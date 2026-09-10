@@ -56,7 +56,7 @@ HTTP POST /api/jobs
   └─ return 201
 ```
 
-**Measured after:** p50 = **0.82ms**, throughput **~4,000 req/s** (11,256 req/s peak at 200 concurrency)
+**Measured after:** p50 = **1.39 ms**, p99 **12.97 ms**, **4,864 req/s** sustained at 100 VUs. Conditions and the rest of the numbers are in the README's [Measured results](../README.md#measured-results).
 
 ---
 

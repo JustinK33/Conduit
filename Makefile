@@ -1,4 +1,4 @@
-.PHONY: up down restart logs ps test test-race bench vet build tidy enqueue enqueue-elt status list ready
+.PHONY: up down restart logs ps test test-race bench vet build tidy enqueue enqueue-elt status list ready measure
 
 # Start the full stack (builds the app image, waits for health checks)
 up:
@@ -30,6 +30,14 @@ test-race:
 # Run microbenchmarks only (-run=^$$ skips the unit tests)
 bench:
 	go test -bench=. -benchmem -run=^$$ ./...
+
+# Reproduce every number in the README's "Measured results" section. Needs k6,
+# jq, and the loadtest compose profile (it starts a webhook sink). This
+# recreates the app container repeatedly, so do not run it against a stack you
+# are using for anything else.
+measure:
+	docker compose --profile loadtest up -d --wait
+	./loadtest/measure.sh all
 
 # Run the Go static analyzer
 vet:

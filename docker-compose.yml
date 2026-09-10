@@ -69,7 +69,8 @@ services:
       timeout: 5s
       retries: 10
     ports:
-      - "5433:5432"
+      # Override when 5433 is taken by another project: POSTGRES_HOST_PORT=5434 make up
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d:ro
@@ -89,9 +90,36 @@ services:
         condition: service_healthy
     env_file:
       - .env
+    # These override .env when set in the host shell, which is how
+    # loadtest/measure.sh drives its A/B runs without rewriting .env.
+    environment:
+      REDIS_ADDRESSES: ${REDIS_ADDRESSES:-redis:6379,redis-2:6379,redis-3:6379}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-8}
+      RECONCILER_RUNNING_LEASE: ${RECONCILER_RUNNING_LEASE:-5m}
+      WEBHOOK_ALLOW_PRIVATE_NETWORKS: ${WEBHOOK_ALLOW_PRIVATE_NETWORKS:-false}
+      # measure.sh points these at a fresh topic per run. Reusing one topic
+      # leaves an uncommitted backlog from the previous run for the consumer to
+      # chew through, which silently starves the Kafka dispatch path.
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-conduit.jobs}
+      KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-conduit-workers}
+      RECONCILER_ENABLED: ${RECONCILER_ENABLED:-true}
+      RECONCILER_BATCH_SIZE: ${RECONCILER_BATCH_SIZE:-100}
+      WORKER_QUEUE_SIZE: ${WORKER_QUEUE_SIZE:-256}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "8080:8080"
     restart: on-failure
+
+  # Webhook target for loadtest/measure.sh. Only starts with `--profile loadtest`,
+  # so a normal `make up` never pulls it. /status/200 answers POST immediately;
+  # /delay/N holds the connection, which is how the crash test parks jobs in RUNNING.
+  sink:
+    image: mccutchen/go-httpbin:v2.15.0
+    profiles: ["loadtest"]
+    # No healthcheck: the image is distroless with no shell or curl, so
+    # measure.sh polls http://localhost:8081/status/200 from the host instead.
+    ports:
+      - "8081:8080"
 
   prometheus:
     image: prom/prometheus:latest
@@ -110,7 +138,8 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
     ports:
-      - "3000:3000"
+      # Override when 3000 is taken: GRAFANA_HOST_PORT=3001 make up
+      - "${GRAFANA_HOST_PORT:-3000}:3000"
 
 volumes:
   pgdata:

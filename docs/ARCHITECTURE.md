@@ -208,18 +208,16 @@ crosses a package boundary lives here so import cycles stay impossible.
 
 ## Design Decisions Worth Explaining
 
-### Why Postgres as source of truth, not Kafka?
-Kafka topics have configurable retention. A job that sits PENDING for a week
-might fall off the log. Postgres doesn't have that problem, and `FOR UPDATE
-SKIP LOCKED` gives us work-stealing semantics for free. Kafka is just the fast
-path for getting work to workers quickly.
-If Kafka is down, the reconciler covers due jobs from Postgres.
+The five decisions that shaped the system live in [docs/decisions](decisions/),
+one record each, with the consequences and the costs written out:
 
-### Why Redlock instead of a single Redis node?
-A single-node lock has an obvious failure mode: the node goes down between
-acquire and release, the TTL expires, and two workers execute the same job.
-Redlock requires a quorum, so losing one node doesn't compromise the guarantee.
-Three nodes is the minimum that makes that math work.
+- [0001](decisions/0001-postgres-as-the-source-of-truth.md) Postgres is the source of truth, not Redis and not Kafka.
+- [0002](decisions/0002-kafka-as-transport-not-as-the-queue.md) Kafka is transport, not the queue.
+- [0003](decisions/0003-redlock-over-postgres-advisory-locks.md) Redlock over Postgres advisory locks, and why the fencing token matters more.
+- [0004](decisions/0004-leases-and-a-reconciler-instead-of-kafka-redelivery.md) Leases and a reconciler, not Kafka redelivery.
+- [0005](decisions/0005-webhook-as-the-execution-model.md) A webhook is the execution model, so Conduit is not a library.
+
+Two smaller choices that do not warrant their own record:
 
 ### Why a semaphore channel over `sync.WaitGroup` for the pool?
 `WaitGroup` lets you wait for work to finish but doesn't bound how much work

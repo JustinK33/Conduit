@@ -47,7 +47,7 @@ PostgreSQL                  Worker Pool ──► JobRunner
 | **Prometheus metrics** | Counters, gauges, histograms exposed on `/metrics` |
 | **Structured logging** | zerolog JSON logs with service/env/component fields |
 | **Graceful shutdown** | SIGTERM drains in-flight jobs before exit |
-| **Fully tested** | All packages tested with `-race`; integration tests gated behind `make docker-up` |
+| **Fully tested** | All packages tested with `-race`; the store integration test is gated behind `POSTGRES_TEST_DSN` |
 
 ---
 
@@ -133,7 +133,7 @@ curl -X POST http://localhost:8080/api/jobs/4a7b1c2d-.../cancel
 
 ## Metrics
 
-All metrics are prefixed `conduit_server_*` by default (configurable via env vars).
+All metrics are prefixed `conduit_service_*` by default (configurable via `METRICS_NAMESPACE` / `METRICS_SUBSYSTEM`).
 
 | Metric | Type | Description |
 |---|---|---|
@@ -151,26 +151,26 @@ All metrics are prefixed `conduit_server_*` by default (configurable via env var
 ## Running Locally
 
 ```bash
-# Start all infrastructure (Kafka, Postgres, Redis, Prometheus, Grafana)
-make docker-up
-
-# Apply the database migration
-psql $POSTGRES_DSN -f migrations/001_create_jobs.sql
+# Infrastructure only, so the server can run outside Docker.
+# `make up` instead brings up the app container too, and Postgres applies
+# migrations/ automatically on first boot either way.
+docker compose up -d kafka redis redis-2 redis-3 postgres
 
 # Build and run
 make build
 ./bin/conduit
 
-# In another terminal, enqueue a test job
+# In another terminal, enqueue a test job. `webhook` and `sql.etl` are the only
+# registered handlers; any other name goes straight to DEAD.
 curl -X POST http://localhost:8080/api/jobs \
   -H 'Content-Type: application/json' \
-  -d '{"task":{"name":"hello-world","queue":"default"}}'
+  -d '{"task":{"name":"webhook","metadata":{"url":"https://example.com/hook"}}}'
 
 # Metrics
 curl http://localhost:8080/metrics | grep conduit
 
 # Tear down
-make docker-down
+make down
 ```
 
 ### Environment Variables
@@ -218,24 +218,13 @@ make bench
 
 ---
 
-## Performance (stress-tested locally)
+## Performance
 
-All numbers measured with Apache Bench against a locally running server (Kafka + Postgres + 3× Redis via Docker Compose).
+Every measured number lives in one place: the [Measured results](README.md#measured-results) section of the README, reproducible with `make measure`.
 
-| Metric | Value | Notes |
-|---|---|---|
-| **Peak throughput** | **11,256 req/s** | 200 concurrent clients, 10,000 requests |
-| **Sustained throughput** | **~4,000 req/s** | 100 concurrent clients |
-| **Error rate** | **0%** | 0 failures across 15,000+ total requests |
-| **API latency p50** | **< 1 ms** (0.82 ms) | Sequential keep-alive measurement |
-| **API latency p95** | **22 ms** | Under 200-client concurrent load |
-| **API latency p99** | **33 ms** | Under 200-client concurrent load |
-| **Job execution p50** | **< 5 ms** | Postgres → Kafka → worker round-trip |
-| **Job execution p99** | **< 100 ms** | Prometheus histogram confirmed |
-| **Distributed lock nodes** | **3** | Redlock quorum across 3 independent Redis nodes |
-
-**Key tuning that drove the gains:**
+The tuning that drove the intake numbers:
 - Made Kafka publish non-blocking (goroutine after Postgres write) - removed the Kafka round-trip from the HTTP hot path
 - pgx pool: MaxConns 25 → 50, added MaxConnLifetime / MaxConnIdleTime / HealthCheckPeriod
 - Kafka producer: snappy compression, 5ms flush frequency, 1MiB flush threshold, 256-deep channel buffer
-- Worker pool: Concurrency 10 → 50, QueueSize 100 → 500
+
+`WORKER_QUEUE_SIZE` is the knob that dominates execution throughput, not `WORKER_CONCURRENCY`; the README explains why.

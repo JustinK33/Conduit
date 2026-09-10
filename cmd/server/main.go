@@ -166,10 +166,19 @@ func run(ctx context.Context) error {
 	}
 	defer jobReconciler.Stop()
 
+	consumerLog := logger.WithComponent(log, "consumer")
 	go func() {
-		h := &kafkaJobHandler{pool: workerPool, log: logger.WithComponent(log, "consumer")}
+		h := &kafkaJobHandler{pool: workerPool, log: consumerLog}
 		if err := kafkaClient.Consume(ctx, []string{cfg.Kafka.Topic}, h); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error().Err(err).Msg("kafka consumer stopped")
+		}
+	}()
+	// Consumer.Return.Errors is on, so sarama pushes consume and rebalance
+	// failures onto this channel. Nothing read it before, which is why a
+	// consumer that stopped delivering jobs looked exactly like an idle one.
+	go func() {
+		for err := range kafkaClient.ConsumerGroup.Errors() {
+			consumerLog.Error().Err(err).Msg("kafka consumer group error")
 		}
 	}()
 
@@ -561,7 +570,11 @@ func (h *kafkaJobHandler) Handle(ctx context.Context, msg *sarama.ConsumerMessag
 		return nil
 	}
 	if !h.pool.Submit(ctx, job) {
-		h.log.Warn().Str("job_id", job.ID).Msg("worker pool full, leaving kafka message uncommitted")
+		// Returning an error skips MarkMessage, but that does not get the job
+		// redelivered: sarama commits the highest marked offset per partition,
+		// so the next message that succeeds commits past this one. The job stays
+		// PENDING in Postgres and the reconciler is what actually recovers it.
+		h.log.Warn().Str("job_id", job.ID).Msg("worker pool full, leaving job for the reconciler")
 		return fmt.Errorf("worker pool full")
 	}
 	return nil

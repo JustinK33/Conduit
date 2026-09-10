@@ -45,7 +45,12 @@ func NewKafkaClient(cfg models.KafkaConfig) (*KafkaClient, error) {
 	sc.Producer.Flush.Bytes = cfg.FlushBytes
 
 	sc.Consumer.Return.Errors = true
-	sc.Consumer.Offsets.Initial = sarama.OffsetNewest
+	// OffsetOldest, not OffsetNewest. Newest means "skip everything published
+	// before this group finished joining", which silently drops every job
+	// enqueued during startup or a rebalance: the group commits nothing, so the
+	// jobs sit PENDING until the reconciler notices. Replaying an already-run
+	// job is harmless because the Postgres claim decides who executes it.
+	sc.Consumer.Offsets.Initial = sarama.OffsetOldest
 
 	producer, err := sarama.NewSyncProducer(cfg.Brokers, sc)
 	if err != nil {

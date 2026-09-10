@@ -38,7 +38,7 @@ func TestNewPostgresStore(t *testing.T) {
 }
 
 func TestCreateJob(t *testing.T) {
-	t.Skip("requires postgres: start the stack with `make docker-up`")
+	t.Skip("requires postgres: see TestJobRoundTripWithoutIdempotencyKey for the POSTGRES_TEST_DSN setup")
 
 	tests := []struct {
 		name string
@@ -54,19 +54,19 @@ func TestCreateJob(t *testing.T) {
 }
 
 func TestUpdateJob(t *testing.T) {
-	t.Skip("requires postgres: start the stack with `make docker-up`")
+	t.Skip("requires postgres: see TestJobRoundTripWithoutIdempotencyKey for the POSTGRES_TEST_DSN setup")
 }
 
 func TestGetJob(t *testing.T) {
-	t.Skip("requires postgres: start the stack with `make docker-up`")
+	t.Skip("requires postgres: see TestJobRoundTripWithoutIdempotencyKey for the POSTGRES_TEST_DSN setup")
 }
 
 func TestCancelJob(t *testing.T) {
-	t.Skip("requires postgres: start the stack with `make docker-up`")
+	t.Skip("requires postgres: see TestJobRoundTripWithoutIdempotencyKey for the POSTGRES_TEST_DSN setup")
 }
 
 func TestClaimNextJob(t *testing.T) {
-	t.Skip("requires postgres: start the stack with `make docker-up`")
+	t.Skip("requires postgres: see TestJobRoundTripWithoutIdempotencyKey for the POSTGRES_TEST_DSN setup")
 }
 
 func TestCanTransition(t *testing.T) {

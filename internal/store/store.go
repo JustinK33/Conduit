@@ -454,11 +454,17 @@ func scanJob(ctx context.Context, row pgx.Row) (models.Job, error) {
 		metaJSON     []byte
 		timeoutNS    int64
 		state        string
+		// idempotency_key and lease_token are written with nullableString, so
+		// they arrive as NULL for any job without a key or an active lease.
+		// Scanning those straight into a string fails with "cannot scan NULL
+		// into *string", so take them through pointers and flatten to "".
+		idempotencyKey *string
+		leaseToken     *string
 	)
 
 	err := row.Scan(
 		&job.ID,
-		&job.IdempotencyKey,
+		&idempotencyKey,
 		&job.Task.ID,
 		&job.Task.Name,
 		&job.Task.Payload,
@@ -474,7 +480,7 @@ func scanJob(ctx context.Context, row pgx.Row) (models.Job, error) {
 		&job.ScheduledAt,
 		&job.StartedAt,
 		&job.LeaseExpiresAt,
-		&job.LeaseToken,
+		&leaseToken,
 		&job.CompletedAt,
 		&job.CreatedAt,
 		&job.UpdatedAt,
@@ -484,6 +490,12 @@ func scanJob(ctx context.Context, row pgx.Row) (models.Job, error) {
 		return models.Job{}, err
 	}
 
+	if idempotencyKey != nil {
+		job.IdempotencyKey = *idempotencyKey
+	}
+	if leaseToken != nil {
+		job.LeaseToken = *leaseToken
+	}
 	job.State = models.JobState(state)
 	job.Task.Timeout = time.Duration(timeoutNS)
 
