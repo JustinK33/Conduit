@@ -100,9 +100,34 @@ Also in this phase: the circuit breaker is a single process-global instance, so 
 
 **Done when** running Conduit for a week does not require opening `psql`.
 
-## Phase 6 - Something an adopter can actually pin
+## Phase 6 - Something an adopter can actually pin (done)
 
-There are no tags, no releases, and no upgrade story.
+Shipped. The README's install is four `docker run` commands against `ghcr.io/justink33/conduit:v0.1.0` and no clone, verified end to end from a directory outside the repository: three migrations applied out of the image, `/ready` green, and a job to `COMPLETED` in 18 ms.
+
+Two things turned up that were not on the original list and mattered more than most of what was.
+
+**There was no `LICENSE`.** The repo had been public for months with `licenseInfo: null`, which means default copyright: no legal right to use, modify, or redistribute it.
+Every other item in this phase was about making Conduit easy to adopt, while the thing actually forbidding adoption was a missing file.
+It is Apache-2.0 now, chosen over MIT for the explicit patent grant, which is what a company's legal review looks for in infrastructure.
+
+**The image was `amd64` only.** `Dockerfile` hardcoded `GOARCH=amd64`, so the one command this phase exists to make work would have run under emulation on any Apple Silicon or Graviton machine.
+`ARG TARGETARCH` plus QEMU and buildx publishes both architectures.
+Worth noting the failure mode the hardcoded value would have caused once buildx was introduced: an `arm64` image containing an `amd64` binary, which fails at exec time rather than at build time.
+
+Publishing also moved out of `cd.yml` and into `ci.yml` as a `push-image` job with `needs: load-test`.
+`needs:` cannot cross workflow files, so as two workflows they ran in parallel and a red suite still shipped an image; the plan's "a `needs: ci` gate on `cd.yml`" was not expressible as written.
+`:latest` now means the newest release rather than the tip of `main`, which is the only reading that makes it safe to put in a quickstart.
+
+Deferred deliberately, both with reasons rather than silently:
+
+- **The `server` / `worker` split.** `CONDUIT_RECONCILER_ENABLED=false` already yields an API-only instance and the pull API already yields remote workers, so a `worker` subcommand that only flips defaults is an abstraction over an environment variable. Revisit when someone needs to scale the pool separately from the API.
+- **A thin client library.** Phase 1's own reasoning argues against it: `loadtest/worker.sh` is a shell script on purpose, because a protocol that needs a client library to be usable is the wrong protocol. `WORKERS.md` plus that script is the reference consumer.
+
+The Kubernetes `Secret` template landed in phase 1 as `deploy/k8s/secret.example.yaml`.
+
+The original write-up follows, since the reasoning is still what the design is for.
+
+**The problem.** There are no tags, no releases, and no upgrade story.
 
 - Tagged releases and a published container image an adopter can pin.
 - A `needs: ci` gate on `cd.yml`, which currently publishes on any push to main even when CI is red.
@@ -117,10 +142,8 @@ There are no tags, no releases, and no upgrade story.
 ## Documentation hygiene
 
 Tracked here because it keeps recurring, not because it is a phase.
-
-- `PROJECT.md`'s environment table lists defaults that no longer match `internal/config/config.go`, and its statistics table says 5 API endpoints while the table above it lists 9.
-- `docs/FEATURES.md` documents probe paths, a ConfigMap, and a CI wait loop that have all since changed.
-- `CONDUIT_METRICS_SUBSYSTEM` defaults to `server` in code, is `service` in `.env.example`, and the README quotes `conduit_service_*`, so the metric prefix depends on whether you copied the example file. Pick one name.
+Currently clear: every default in `PROJECT.md`'s environment table matches `internal/config/config.go`, the endpoint counts match `internal/api/handler.go`, `docs/FEATURES.md`'s probe paths and ConfigMap match `deploy/k8s/`, and `CONDUIT_METRICS_SUBSYSTEM` is `server` in the code, in `.env.example`, in the ConfigMap, and in every metric name the docs quote.
+The pattern to watch for is a doc that quotes a default or a path rather than pointing at the file that owns it.
 
 ## Already done
 

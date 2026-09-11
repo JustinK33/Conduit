@@ -293,22 +293,24 @@ spec:
       terminationGracePeriodSeconds: 35  # longer than ShutdownTimeout (30s)
       containers:
         - name: conduit
-          image: conduit:latest
+          image: ghcr.io/justink33/conduit:v0.1.0
           envFrom:
             - configMapRef:
                 name: conduit-config   # non-secret env vars
             - secretRef:
                 name: conduit-secrets  # CONDUIT_POSTGRES_DSN, Redis passwords
           readinessProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: /ready, port: http }   # pings Postgres
             initialDelaySeconds: 5
-            periodSeconds: 10
-            failureThreshold: 3
+            periodSeconds: 15
           livenessProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: /live, port: http }    # process-is-up only
             initialDelaySeconds: 15
-            periodSeconds: 20
-            failureThreshold: 3
+            periodSeconds: 30
+          startupProbe:
+            httpGet: { path: /live, port: http }
+            periodSeconds: 5
+            failureThreshold: 12
           resources:
             requests: { cpu: 100m, memory: 128Mi }
             limits:   { cpu: 500m, memory: 256Mi }
@@ -320,7 +322,8 @@ spec:
 |---|---|
 | `replicas: 3` | Three pods share the claim load, and under `CONDUIT_LOCK=redlock` the count also matches the 3-node Redis quorum |
 | `terminationGracePeriodSeconds: 35` | Must be longer than the worker's `ShutdownTimeout` (30s) so in-flight jobs finish before the pod is killed |
-| `readinessProbe` before `livenessProbe` | Readiness removes the pod from load balancer rotation; liveness restarts it. Both hit `/health`. |
+| `readinessProbe` on `/ready`, `livenessProbe` on `/live` | Readiness removes the pod from load balancer rotation, so it hits the endpoint that pings dependencies. Liveness *restarts* the pod, so it must not: a Postgres blip would otherwise restart every replica, turning a dependency outage into a crash loop. `/live` answers for the process alone. |
+| `startupProbe` on top of both | Gives a slow first boot 60s to come up without a slow liveness probe killing it, which is what lets liveness stay aggressive afterwards. |
 | `requests` < `limits` | Allows bursting - pod can use up to 500m CPU temporarily without being throttled by default |
 | `envFrom.secretRef` | Credentials (DSN, passwords) come from a Kubernetes Secret, not the ConfigMap (which is world-readable within the cluster) |
 
@@ -373,19 +376,23 @@ Non-secret config lives here. Changing a value and re-applying the ConfigMap tak
 
 **File:** `.github/workflows/ci.yml`
 
-Three jobs run in order. A later job only starts if the previous one passes.
+Four jobs run in order. A later job only starts if the previous one passes.
 
 ```
 push/PR
   │
   ▼
-┌─────────┐     ┌─────────┐     ┌────────────┐
-│  test   │────►│  build  │────►│ load-test  │
-└─────────┘     └─────────┘     └────────────┘
-  vet             compile          docker-compose
-  unit tests      docker build     real server
-  race detector   upload binary    k6 load test
+┌─────────┐     ┌─────────┐     ┌────────────┐     ┌────────────┐
+│  test   │────►│  build  │────►│ load-test  │────►│ push-image │
+└─────────┘     └─────────┘     └────────────┘     └────────────┘
+  vet             compile          docker compose     amd64 + arm64
+  unit tests      docker build     real server        GHCR push
+  race detector   upload binary    k6 load test       push events only
 ```
+
+Publishing used to live in a second workflow, `cd.yml`, which ran in parallel with this one.
+`needs:` cannot cross workflow files, so a red test suite still shipped an image.
+Folding the job in here is what makes the arrow into `push-image` real.
 
 #### `test` job
 
@@ -430,6 +437,27 @@ This job spins up the real infrastructure (not mocks), applies the schema with t
 - `p(95) < 50ms`
 - Error rate < 1%
 
+#### `push-image` job (depends on `load-test`)
+
+```yaml
+if: github.event_name == 'push'     # a pull request never publishes
+permissions:
+  packages: write                   # only this job gets it
+platforms: linux/amd64,linux/arm64
+```
+
+`docker/metadata-action` computes the tags, and what they mean is deliberate:
+
+| Trigger | Tags |
+|---|---|
+| push to `main` | `:main`, `:<sha>` |
+| tag `v1.2.3` | `:v1.2.3`, `:v1.2`, `:latest` |
+
+So `:latest` is the last release, not the tip of `main`, which is what someone typing `docker run ghcr.io/justink33/conduit` is asking for.
+
+The `arm64` half needs QEMU plus buildx, and it needs the `Dockerfile` to stop hardcoding `GOARCH`.
+`ARG TARGETARCH` is populated by buildx per platform; without it, buildx would happily produce an `arm64` image containing an `amd64` binary that fails on exec rather than at build time.
+
 ---
 
 ### Interview Questions You Should Know
@@ -462,4 +490,4 @@ A: `ClusterIP` exposes the Service on a cluster-internal IP - only reachable fro
 | Redlock logic | `internal/lock/redlock.go` (unchanged - already correct) |
 | Advisory locks, now the default | `internal/lock/postgres.go` |
 | K8s manifests | `deploy/k8s/deployment.yaml`, `service.yaml`, `configmap.yaml`, `hpa.yaml` |
-| CI/CD | `.github/workflows/ci.yml`, `loadtest/k6.js` |
+| CI/CD | `.github/workflows/ci.yml`, `loadtest/k6.js`, `Dockerfile` |

@@ -24,9 +24,11 @@ spec:
       # third pods find nothing to do. An init container rather than a Job
       # because it also covers the rollout case, where a new image's schema has
       # to land before that image starts serving.
+      # Both containers pin the same tag on purpose: the schema this applies and
+      # the code that reads it have to come from one build. Bump them together.
       initContainers:
         - name: migrate
-          image: conduit:latest
+          image: ghcr.io/justink33/conduit:v0.1.0
           imagePullPolicy: IfNotPresent
           args: ["migrate"]
           envFrom:
@@ -43,7 +45,7 @@ spec:
               memory: "128Mi"
       containers:
         - name: conduit
-          image: conduit:latest
+          image: ghcr.io/justink33/conduit:v0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

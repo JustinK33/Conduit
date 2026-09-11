@@ -100,7 +100,8 @@ deploy/prometheus/   ← prometheus.yml scrape config
 | Logging | zerolog (`github.com/rs/zerolog`) |
 | Containerisation | Docker Compose (Postgres by default; Kafka, 3× Redis, Prometheus, Grafana behind profiles) |
 | Orchestration | Kubernetes - Deployment (3 replicas), Service, HPA (min 3 / max 10) |
-| CI/CD | GitHub Actions - vet → unit tests → race detector → Docker build → k6 load test |
+| CI/CD | GitHub Actions - vet → unit tests → race detector → Docker build → k6 load test → multi-arch GHCR push |
+| Distribution | `ghcr.io/justink33/conduit`, `linux/amd64` and `linux/arm64`, Apache-2.0 |
 
 ---
 
@@ -164,7 +165,7 @@ curl -X POST http://localhost:8080/api/jobs/4a7b1c2d-.../complete \
 
 ## Metrics
 
-All metrics are prefixed `conduit_service_*` by default (configurable via `CONDUIT_METRICS_NAMESPACE` / `CONDUIT_METRICS_SUBSYSTEM`).
+All metrics are prefixed `conduit_server_*` by default (configurable via `CONDUIT_METRICS_NAMESPACE` / `CONDUIT_METRICS_SUBSYSTEM`).
 
 | Metric | Type | Description |
 |---|---|---|
@@ -251,7 +252,7 @@ make bench
 | Source lines (production) | ~1 600 |
 | Test coverage | all packages (`-race` clean) |
 | Infrastructure components | PostgreSQL. Kafka, 3× Redis, Prometheus, and Grafana are optional, behind compose profiles. |
-| Kubernetes manifests | Deployment, Service, ConfigMap, HPA |
+| Kubernetes manifests | Deployment (with a `migrate` init container), Service, ConfigMap, HPA, Secret template |
 | API endpoints | 9 job routes plus 4 operational |
 | Prometheus metrics | 8 |
 | Cron scheduler | built-in (zero external deps) |

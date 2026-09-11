@@ -168,6 +168,33 @@ Each key must be at least 16 characters or the server refuses to start.
 
 Keys go in `.env` or a Secret. Never in a config file that is committed, and never in a ConfigMap.
 
+## The image
+
+`ghcr.io/justink33/conduit`, published for `linux/amd64` and `linux/arm64`, and only after the unit tests, the race detector, and the k6 load test have all passed on that commit.
+
+| Tag | Means | Use it for |
+| --- | --- | --- |
+| `:v1.2.3` | One immutable build | Anything you deploy. `deploy/k8s/deployment.yaml` pins one of these. |
+| `:v1.2` | Newest patch on that minor | Picking up patches without re-pinning, if you trust that. |
+| `:latest` | Newest release | A local trial. Not a deployment: it moves under you. |
+| `:main` | Tip of `main` | Trying something unreleased. |
+| `:<sha>` | One commit | Bisecting, or pinning something not yet tagged. |
+
+Pin a `:vX.Y.Z` in anything real.
+`imagePullPolicy: IfNotPresent` in the manifests is correct precisely because the tag does not move; it is wrong the moment you point it at `:latest` or `:main`, because a pod that already has the image will never notice a new one.
+
+## Upgrading
+
+The schema has to land before the code that reads it, and both have to come from the same build.
+
+1. Bump the tag in **both** places in `deploy/k8s/deployment.yaml`, the `migrate` init container and the `conduit` container. They are deliberately identical.
+2. `kubectl apply`. The init container runs `conduit migrate` before the new code serves anything, and the rollout is a normal rolling update from there.
+3. Nothing to do for the old pods. Every write is fenced on `lease_token`, so a job in flight on an old pod either finishes or has its lease expire and gets requeued.
+
+Rolling back means re-applying the previous tag.
+Migrations are not reversible, which is the real constraint: a rollback runs old code against a newer schema.
+Every migration so far is additive, so that works, and keeping it that way is the price of a one-step rollback.
+
 ## Migrations
 
 `conduit migrate` applies every file in `migrations/` in filename order, records each one in `schema_migrations`, and takes an advisory lock first so concurrent runs serialise instead of racing.
@@ -187,9 +214,9 @@ Applying twice is a no-op, which is what makes it safe to run unconditionally on
 - [ ] `CONDUIT_WORKER_QUEUES` set if remote workers exist, or the server competes for their jobs and dead-letters them. See [WORKERS.md](WORKERS.md).
 - [ ] `CONDUIT_POSTGRES_DSN` pointing at a database with backups. Postgres is the source of truth; losing it loses the queue.
 - [ ] `conduit migrate` run against the target database, by the compose service, the init container, or by hand.
+- [ ] A `:vX.Y.Z` tag pinned, not `:latest` or `:main`, and the same tag on both containers in `deployment.yaml`.
 
 ## Known gaps
 
 - **`CONDUIT_METRICS_LISTEN_ADDRESS` is parsed and ignored.** `/metrics` is served on the main HTTP port, which is why the proxy has to gate it. A separate metrics listener would be the better answer.
 - **The API key is all-or-nothing.** Holding it means claiming, cancelling, and reading every job. Per-key identity is [phase 2](ROADMAP.md#phase-2---more-than-one-tenant).
-- **`deploy/k8s/deployment.yaml` names `conduit:latest`**, which resolves to nothing. Point it at your registry until [phase 6](ROADMAP.md#phase-6---something-an-adopter-can-actually-pin) lands published images.

@@ -9,7 +9,11 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/conduit ./cmd/server
+# TARGETARCH is set by buildx per platform in the matrix. Hardcoding amd64 here
+# would silently produce an amd64 binary inside an arm64 image, which fails at
+# exec time rather than at build time.
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -o /out/conduit ./cmd/server
 
 FROM gcr.io/distroless/static-debian12:nonroot
 

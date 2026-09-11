@@ -1,6 +1,6 @@
 # Conduit
 
-[![ci](https://github.com/JustinK33/Conduit/actions/workflows/ci.yml/badge.svg)](https://github.com/JustinK33/Conduit/actions/workflows/ci.yml) [![cd](https://github.com/JustinK33/Conduit/actions/workflows/cd.yml/badge.svg)](https://github.com/JustinK33/Conduit/actions/workflows/cd.yml)
+[![ci](https://github.com/JustinK33/Conduit/actions/workflows/ci.yml/badge.svg)](https://github.com/JustinK33/Conduit/actions/workflows/ci.yml) [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 Exactly-once execution is what every job queue's marketing implies and none of them can deliver: a worker can always die between doing the work and recording that it did.
 Conduit ships at-least-once and says so out loud.
@@ -65,6 +65,40 @@ It is also the reason a transport is optional at all - it is already the guarant
 [docs/decisions/](docs/decisions/) has the six decisions that shaped it, each with its costs written out.
 
 ## Quick start
+
+No clone. The image carries its own migrations, so the whole install is a Postgres, one migration run, and the server.
+
+```bash
+docker network create conduit
+
+docker run -d --name conduit-pg --network conduit \
+  -e POSTGRES_USER=conduit -e POSTGRES_PASSWORD=conduit -e POSTGRES_DB=conduit \
+  postgres:16-alpine
+
+DSN='postgres://conduit:conduit@conduit-pg:5432/conduit?sslmode=disable'
+
+docker run --rm --network conduit -e CONDUIT_POSTGRES_DSN="$DSN" \
+  ghcr.io/justink33/conduit:v0.1.0 migrate
+
+docker run -d --name conduit --network conduit -p 8080:8080 \
+  -e CONDUIT_POSTGRES_DSN="$DSN" \
+  ghcr.io/justink33/conduit:v0.1.0
+```
+
+```bash
+curl -X POST localhost:8080/api/jobs -H 'content-type: application/json' \
+  -d '{"queue":"default","task":{"name":"webhook","metadata":{"url":"https://your-endpoint.example/hook","method":"POST"},"timeout":15000000000}}'
+```
+
+`amd64` and `arm64` images are published, so that runs natively on an Apple Silicon or Graviton machine rather than under emulation.
+The tag is a pin: `:v0.1.0` never moves, `:latest` follows the newest release, and `:main` follows the tip of this branch.
+
+That quickstart is a local trial and not a deployment: the database password is `conduit`, there is no TLS, and `CONDUIT_API_KEYS` is unset so anything that can reach port 8080 can enqueue work.
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is the checklist for the real thing.
+
+### From a clone
+
+Working on Conduit itself, or reproducing the measurements below:
 
 ```bash
 cp .env.example .env
@@ -149,7 +183,7 @@ Latency is end-to-end wall clock out of Postgres (`updated_at - created_at`), no
 | All of the above, concurrency 32 | 530.5 | 1.86 s | 3.10 s |
 
 The default configuration is the bottleneck, not the architecture.
-Mean time inside a worker is 5.76 ms (`conduit_service_job_duration_seconds_sum / _count` over the 2,000-job run), so eight workers should manage roughly 1,400 jobs/s.
+Mean time inside a worker is 5.76 ms (`conduit_server_job_duration_seconds_sum / _count` over the 2,000-job run), so eight workers should manage roughly 1,400 jobs/s.
 They manage 55.
 A burst larger than `CONDUIT_WORKER_QUEUE_SIZE=256` gets refused by the pool, falls off the Kafka fast path, and lands on the reconciler, whose `CONDUIT_RECONCILER_BATCH_SIZE=100` claims per one-second tick becomes the real ceiling.
 Raising the pool's buffer is the single biggest win because it keeps work on the fast path at all.
@@ -312,7 +346,7 @@ I built all three because I wanted to know exactly what each one cost, and now t
 - [PROJECT.md](PROJECT.md) has the API surface with curl examples and response shapes, plus the config table.
 - [docs/FEATURES.md](docs/FEATURES.md) goes deep on four pieces: the async publish and its tradeoff, Redlock, the Kubernetes manifests, and the CI/CD pipeline.
 - [docs/use-cases/sql-elt.md](docs/use-cases/sql-elt.md) walks a real pipeline config, with [examples/daily_revenue_pipeline.json](examples/daily_revenue_pipeline.json) as the input.
-- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API above, phase 3 is the Postgres-only default; next is a release you can pin.
+- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API above, phase 3 is the Postgres-only default, phase 6 is the pinned image in the quick start; next is making the default configuration the fast one.
 - [migrations/](migrations/) is the schema, applied by `conduit migrate` (`make migrate`, and automatically on every `make up`).
 
 ## Tech stack
@@ -326,7 +360,7 @@ I built all three because I wanted to know exactly what each one cost, and now t
 | Locking | `pg_try_advisory_lock` by default; 3-node Redis Redlock via `go-redis/v9` with `CONDUIT_LOCK=redlock` |
 | Logs | `zerolog` |
 | Metrics | `prometheus/client_golang`, scraped by Prometheus, Grafana alongside |
-| Deploy | Docker Compose for local, Kubernetes manifests under `deploy/k8s` with an HPA |
+| Deploy | `ghcr.io/justink33/conduit`, `amd64` and `arm64`, published only after the full suite and the k6 load test pass. Docker Compose for local, Kubernetes manifests under `deploy/k8s` with an HPA |
 | Checks | `go vet`, `go test -race`, five benchmark suites, k6 load test in CI |
 
 Six direct requires.
@@ -349,3 +383,7 @@ POSTGRES_TEST_DSN='postgres://conduit:conduit@localhost:5434/conduit?sslmode=dis
 ```
 
 Every Makefile target is commented inline, and `make down` wipes the volumes for a clean start.
+
+## License
+
+[Apache-2.0](LICENSE).

@@ -4,7 +4,14 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   pull_request:
+
+# Least privilege by default. push-image widens it to packages: write for
+# itself, and nothing else in this workflow needs to write anything.
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -128,3 +135,69 @@ jobs:
       - name: Conduit logs (on failure)
         if: failure()
         run: cat /tmp/conduit.log || true
+
+  # Publishing lives in this workflow rather than its own, because `needs:`
+  # cannot cross workflow files. It used to be cd.yml, which ran in parallel
+  # with this one, so a red test suite still shipped an image.
+  push-image:
+    runs-on: ubuntu-latest
+    needs: load-test
+    # Pull requests never publish. That is also what keeps forked PRs working,
+    # since their GITHUB_TOKEN has no packages: write.
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image name, lowercased
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
+      # A main push gets :main and the bare :<sha>. A v* tag additionally gets
+      # :v1.2.3, :v1.2, and :latest, so :latest tracks the last release rather
+      # than the tip of main - which is what someone reading
+      # `docker run ghcr.io/.../conduit` expects to get.
+      #
+      # The v prefix is kept explicitly: {{version}} alone strips it, and the
+      # tag in deploy/k8s and the README quickstart is written with the v.
+      # latest=false plus one explicit raw tag, rather than latest=auto, so the
+      # condition is readable here instead of being a documented default.
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=ref,event=branch
+            type=sha,format=long,prefix=
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=Conduit
+            org.opencontainers.image.licenses=Apache-2.0
+
+      # QEMU and buildx are what make the arm64 half of the matrix possible.
+      # The Dockerfile reads TARGETARCH, so each platform gets a native binary.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
