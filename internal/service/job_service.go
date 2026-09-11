@@ -56,6 +56,12 @@ func (s *JobService) Enqueue(ctx context.Context, job models.Job) (string, error
 	if job.State == "" {
 		job.State = models.JobStatePending
 	}
+	if job.Task.Queue == "" {
+		// task_queue routes claims now, so "the default queue" needs one
+		// spelling. The column's own default is 'default', but CreateJob always
+		// writes the field, so an unset queue would otherwise land as ''.
+		job.Task.Queue = models.DefaultQueue
+	}
 	now := time.Now().UTC()
 	if job.ScheduledAt == nil {
 		job.ScheduledAt = &now

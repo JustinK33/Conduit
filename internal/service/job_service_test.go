@@ -513,3 +513,32 @@ func TestFail(t *testing.T) {
 		}
 	})
 }
+
+func TestEnqueueNormalisesTheQueue(t *testing.T) {
+	tests := []struct {
+		name  string
+		queue string
+		want  string
+	}{
+		// task_queue routes claims now, so an unset queue has to land on the
+		// same name a worker asks for rather than on ''.
+		{name: "unset becomes the default queue", queue: "", want: models.DefaultQueue},
+		{name: "an explicit queue is left alone", queue: "remote", want: "remote"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := &mockStore{}
+			svc := newTestService(ms, &mockPublisher{})
+
+			if _, err := svc.Enqueue(context.Background(), models.Job{
+				Task: models.Task{Name: "send-email", Queue: tc.queue},
+			}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ms.createdJob.Task.Queue != tc.want {
+				t.Errorf("stored queue = %q, want %q", ms.createdJob.Task.Queue, tc.want)
+			}
+		})
+	}
+}

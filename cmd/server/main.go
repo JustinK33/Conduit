@@ -161,6 +161,10 @@ func run(ctx context.Context) error {
 		IdleInterval: cfg.Reconciler.IdleInterval,
 		BatchSize:    cfg.Reconciler.BatchSize,
 		RunningLease: cfg.Reconciler.RunningLease,
+		// The reconciler claims on behalf of the in-process pool, so it must
+		// respect the same queue filter. Without this it would win jobs meant
+		// for remote workers and dead-letter them for having no handler.
+		Queues: cfg.Worker.Queues,
 	}, jobStore, workerPool, logger.WithComponent(log, "reconciler"))
 	if cfg.Reconciler.Enabled {
 		jobReconciler.Start(ctx)
@@ -194,7 +198,23 @@ func run(ctx context.Context) error {
 	// Recovery is installed by api.RegisterRoutes so it can use the same
 	// request-scoped logger as the other middlewares.
 
-	handler := api.NewHandler(jobSvc, jobStore, logger.WithComponent(log, "api"), reg)
+	// gin trusts every proxy by default, which makes the client_ip in the
+	// request log forgeable by anyone sending X-Forwarded-For. Empty means
+	// trust nothing and use the peer address, which is correct when nothing is
+	// in front; set TRUSTED_PROXIES to the proxy's CIDR when something is.
+	if err := router.SetTrustedProxies(cfg.HTTP.TrustedProxies); err != nil {
+		return fmt.Errorf("trusted proxies: %w", err)
+	}
+
+	if len(cfg.HTTP.APIKeys) == 0 {
+		log.Warn().Msg("API_KEYS is empty: /api/jobs is unauthenticated, so anyone who can reach this port can enqueue, claim, and cancel work")
+	} else {
+		// The process cannot see what is in front of it, so this is
+		// unconditional rather than clever.
+		log.Warn().Msg("API keys are bearer tokens and this server speaks plain HTTP: terminate TLS in front of it or the keys transit in clear (see docs/DEPLOYMENT.md)")
+	}
+
+	handler := api.NewHandler(jobSvc, jobStore, logger.WithComponent(log, "api"), reg, cfg.HTTP.APIKeys)
 	handler.RegisterRoutes(router)
 	router.GET("/metrics", gin.WrapH(reg.Handler()))
 	router.GET("/live", func(c *gin.Context) {

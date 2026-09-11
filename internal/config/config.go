@@ -105,6 +105,7 @@ func LoadFromEnvironment(env Environment) (models.Config, error) {
 	p.dur("HTTP_WRITE_TIMEOUT", &cfg.HTTP.WriteTimeout)
 	p.dur("HTTP_IDLE_TIMEOUT", &cfg.HTTP.IdleTimeout)
 	p.strs("API_KEYS", &cfg.HTTP.APIKeys)
+	p.strs("TRUSTED_PROXIES", &cfg.HTTP.TrustedProxies)
 
 	p.strs("KAFKA_BROKERS", &cfg.Kafka.Brokers)
 	p.str("KAFKA_TOPIC", &cfg.Kafka.Topic)

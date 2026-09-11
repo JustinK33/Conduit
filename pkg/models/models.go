@@ -15,16 +15,23 @@ const (
 
 // Task describes the payload and execution metadata for a job.
 type Task struct {
-	ID             string            `json:"id"`
-	Name           string            `json:"name"`
-	Payload        []byte            `json:"payload,omitempty"`
-	RetryCount     int               `json:"retry_count"`
-	MaxRetries     int               `json:"max_retries"`
-	Timeout        time.Duration     `json:"timeout"`
-	CronExpression string            `json:"cron_expression,omitempty"`
-	Queue          string            `json:"queue,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
+	ID             string        `json:"id"`
+	Name           string        `json:"name"`
+	Payload        []byte        `json:"payload,omitempty"`
+	RetryCount     int           `json:"retry_count"`
+	MaxRetries     int           `json:"max_retries"`
+	Timeout        time.Duration `json:"timeout"`
+	CronExpression string        `json:"cron_expression,omitempty"`
+	// Queue is the routing key: a worker claims from the queues it names, so a
+	// remote worker never wins a job it has no code for. Empty is normalised to
+	// DefaultQueue on enqueue.
+	Queue    string            `json:"queue,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
+
+// DefaultQueue is where a job goes when it names no queue. It matches the
+// task_queue column's own default in migrations/001.
+const DefaultQueue = "default"
 
 // Job is the durable execution record that moves through the state machine.
 type Job struct {
@@ -53,6 +60,10 @@ type HTTPConfig struct {
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
 	APIKeys      []string
+	// TrustedProxies is a CIDR list. Empty means trust nothing, so gin uses the
+	// direct peer address and a forged X-Forwarded-For cannot poison the audit
+	// log. Set it to the reverse proxy's network to get real client addresses.
+	TrustedProxies []string
 }
 
 type KafkaConfig struct {

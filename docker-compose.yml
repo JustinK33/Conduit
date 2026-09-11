@@ -94,6 +94,7 @@ services:
     # loadtest/measure.sh drives its A/B runs without rewriting .env.
     environment:
       API_KEYS: ${API_KEYS:-}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       REDIS_ADDRESSES: ${REDIS_ADDRESSES:-redis:6379,redis-2:6379,redis-3:6379}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-8}
       WORKER_QUEUES: ${WORKER_QUEUES:-}

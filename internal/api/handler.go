@@ -14,10 +14,15 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Queue is the business-level adapter exposed to the HTTP layer.
+// Queue is the business-level adapter exposed to the HTTP layer. The four
+// worker methods are the pull protocol; see worker.go.
 type Queue interface {
 	Enqueue(context.Context, models.Job) (string, error)
 	Cancel(context.Context, string) error
+	Claim(ctx context.Context, queues []string, lease time.Duration) (models.Job, error)
+	Heartbeat(ctx context.Context, id, leaseToken string, lease time.Duration) (time.Time, error)
+	Complete(ctx context.Context, id, leaseToken string, meta map[string]string) error
+	Fail(ctx context.Context, id, leaseToken, errMsg string, permanent bool) (models.Job, error)
 }
 
 type Handler struct {
@@ -25,6 +30,8 @@ type Handler struct {
 	Store   store.JobStore
 	Logger  zerolog.Logger
 	Metrics *metrics.Registry
+	// APIKeys guards the /api/jobs group. Empty means the API is open.
+	APIKeys []string
 }
 
 type EnqueueRequest struct {
@@ -34,18 +41,26 @@ type EnqueueRequest struct {
 	Metadata       map[string]string `json:"metadata,omitempty"`
 }
 
-func NewHandler(queue Queue, jobs store.JobStore, logger zerolog.Logger, reg *metrics.Registry) *Handler {
-	return &Handler{Queue: queue, Store: jobs, Logger: logger, Metrics: reg}
+func NewHandler(queue Queue, jobs store.JobStore, logger zerolog.Logger, reg *metrics.Registry, apiKeys []string) *Handler {
+	return &Handler{Queue: queue, Store: jobs, Logger: logger, Metrics: reg, APIKeys: apiKeys}
 }
 
 func (h *Handler) RegisterRoutes(router gin.IRouter) {
 	router.Use(RequestID(h.Logger), RequestLogger(), Recovery(), h.metricsMiddleware())
-	g := router.Group("/api/jobs")
+	// Auth mounts on the group, not the router: cmd/server registers /metrics,
+	// /live, /ready, and /health on the root and those must stay reachable.
+	g := router.Group("/api/jobs", APIKeyAuth(h.APIKeys))
 	g.POST("", h.EnqueueJob)
 	g.GET("", h.ListJobs)
 	g.GET("/by-idempotency-key/:key", h.GetJobByIdempotencyKey)
+	// claim is declared before /:id/... so it is obvious that it is a static
+	// segment, though gin matches static ahead of params regardless.
+	g.POST("/claim", h.ClaimJob)
 	g.GET("/:id", h.GetJobStatus)
 	g.POST("/:id/cancel", h.CancelJob)
+	g.POST("/:id/heartbeat", h.HeartbeatJob)
+	g.POST("/:id/complete", h.CompleteJob)
+	g.POST("/:id/fail", h.FailJob)
 }
 
 func (h *Handler) metricsMiddleware() gin.HandlerFunc {

@@ -39,6 +39,16 @@ func (m mockQueue) Enqueue(context.Context, models.Job) (string, error) {
 	return m.enqueueID, m.enqueueErr
 }
 func (m mockQueue) Cancel(context.Context, string) error { return m.cancelErr }
+func (m mockQueue) Claim(context.Context, []string, time.Duration) (models.Job, error) {
+	return models.Job{}, store.ErrJobNotFound
+}
+func (m mockQueue) Heartbeat(context.Context, string, string, time.Duration) (time.Time, error) {
+	return time.Time{}, nil
+}
+func (m mockQueue) Complete(context.Context, string, string, map[string]string) error { return nil }
+func (m mockQueue) Fail(context.Context, string, string, string, bool) (models.Job, error) {
+	return models.Job{}, nil
+}
 
 type spyQueue struct {
 	enqueueID string
@@ -51,6 +61,16 @@ func (s *spyQueue) Enqueue(_ context.Context, job models.Job) (string, error) {
 }
 
 func (s *spyQueue) Cancel(context.Context, string) error { return nil }
+func (s *spyQueue) Claim(context.Context, []string, time.Duration) (models.Job, error) {
+	return models.Job{}, store.ErrJobNotFound
+}
+func (s *spyQueue) Heartbeat(context.Context, string, string, time.Duration) (time.Time, error) {
+	return time.Time{}, nil
+}
+func (s *spyQueue) Complete(context.Context, string, string, map[string]string) error { return nil }
+func (s *spyQueue) Fail(context.Context, string, string, string, bool) (models.Job, error) {
+	return models.Job{}, nil
+}
 
 // mockStore satisfies store.JobStore with controllable responses.
 type mockStore struct {
@@ -89,7 +109,7 @@ func TestNewHandler(t *testing.T) {
 	t.Run("wires queue and store dependencies", func(t *testing.T) {
 		q := mockQueue{enqueueID: "job-1"}
 		s := mockStore{}
-		h := NewHandler(q, s, zerolog.Logger{}, testRegistry())
+		h := NewHandler(q, s, zerolog.Logger{}, testRegistry(), nil)
 		if h == nil {
 			t.Fatal("NewHandler returned nil")
 		}
@@ -104,7 +124,7 @@ func TestNewHandler(t *testing.T) {
 
 func TestHandlerRegisterRoutes(t *testing.T) {
 	t.Run("mounts enqueue, status, and cancel routes", func(t *testing.T) {
-		h := NewHandler(mockQueue{enqueueID: "job-1"}, mockStore{}, zerolog.Logger{}, testRegistry())
+		h := NewHandler(mockQueue{enqueueID: "job-1"}, mockStore{}, zerolog.Logger{}, testRegistry(), nil)
 		if h == nil {
 			t.Skip("NewHandler not yet implemented")
 		}
@@ -147,7 +167,7 @@ func TestEnqueueJob(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewHandler(tc.queue, mockStore{}, zerolog.Logger{}, testRegistry())
+			h := NewHandler(tc.queue, mockStore{}, zerolog.Logger{}, testRegistry(), nil)
 			if h == nil {
 				t.Skip("NewHandler not yet implemented")
 			}
@@ -168,7 +188,7 @@ func TestEnqueueJob(t *testing.T) {
 
 func TestEnqueueJobIgnoresServerOwnedFields(t *testing.T) {
 	queue := &spyQueue{enqueueID: "created-job"}
-	h := NewHandler(queue, mockStore{}, zerolog.Logger{}, testRegistry())
+	h := NewHandler(queue, mockStore{}, zerolog.Logger{}, testRegistry(), nil)
 	router := gin.New()
 	h.RegisterRoutes(router)
 
@@ -232,7 +252,7 @@ func TestGetJobStatus(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewHandler(mockQueue{}, tc.store, zerolog.Logger{}, testRegistry())
+			h := NewHandler(mockQueue{}, tc.store, zerolog.Logger{}, testRegistry(), nil)
 			if h == nil {
 				t.Skip("NewHandler not yet implemented")
 			}
@@ -281,7 +301,7 @@ func TestGetJobByIdempotencyKey(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewHandler(mockQueue{}, tc.store, zerolog.Logger{}, testRegistry())
+			h := NewHandler(mockQueue{}, tc.store, zerolog.Logger{}, testRegistry(), nil)
 			router := gin.New()
 			h.RegisterRoutes(router)
 
@@ -313,7 +333,7 @@ func TestCancelJob(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewHandler(tc.queue, mockStore{}, zerolog.Logger{}, testRegistry())
+			h := NewHandler(tc.queue, mockStore{}, zerolog.Logger{}, testRegistry(), nil)
 			if h == nil {
 				t.Skip("NewHandler not yet implemented")
 			}

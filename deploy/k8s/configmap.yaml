@@ -31,6 +31,10 @@ data:
   WEBHOOK_MAX_REDIRECTS: "0"
   WEBHOOK_ALLOW_PRIVATE_NETWORKS: "false"
   HTTP_ADDRESS: ":8080"
+  # Set to the pod network CIDR when an Ingress fronts this, so the logged
+  # client_ip is the real caller rather than the ingress controller. Empty means
+  # trust no X-Forwarded-For at all.
+  TRUSTED_PROXIES: ""
   LOG_LEVEL: "info"
   LOG_FORMAT: "json"
   METRICS_NAMESPACE: "conduit"
