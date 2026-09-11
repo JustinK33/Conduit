@@ -51,4 +51,6 @@ testdata/*.tmp
 # Generated Docker and compose state
 docker-data/
 *.pid
-.claude2
+
+# Local editor and agent state, never part of a build
+.claude/
