@@ -1,8 +1,21 @@
 name: conduit
 
+# Plain `docker compose up` is Postgres, one migration run, and the app. Nothing
+# else here is required to have a working Conduit:
+#
+#   --profile kafka         the Kafka transport (CONDUIT_TRANSPORT=kafka)
+#   --profile redis         Redlock (CONDUIT_LOCK=redlock)
+#   --profile observability Prometheus and Grafana
+#   --profile loadtest      the webhook sink loadtest/measure.sh needs
+#
+# Compose rejects a depends_on pointing at a profiled service, so `app` depends
+# on Postgres alone and tolerates Kafka and Redis being absent. That is enforced
+# by config.Validate, which only requires a broker for the Kafka transport and
+# only requires Redis addresses for Redlock.
 services:
   kafka:
     image: apache/kafka:latest
+    profiles: ["kafka"]
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -26,6 +39,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    profiles: ["redis"]
     command: ["redis-server", "--appendonly", "yes"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -37,6 +51,7 @@ services:
 
   redis-2:
     image: redis:7-alpine
+    profiles: ["redis"]
     command: ["redis-server", "--appendonly", "yes"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -48,6 +63,7 @@ services:
 
   redis-3:
     image: redis:7-alpine
+    profiles: ["redis"]
     command: ["redis-server", "--appendonly", "yes"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -73,26 +89,42 @@ services:
       - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+    # No initdb mount. The entrypoint runs exactly once, on first boot, on an
+    # empty volume, so any migration added after a deployment existed would never
+    # reach it. The `migrate` service below is the one migration mechanism.
+
+  # Applies the schema, then exits. Runs on every `up`, which is safe: each
+  # migration is applied once and recorded in schema_migrations, and an advisory
+  # lock serialises concurrent runs.
+  migrate:
+    build: .
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      CONDUIT_LOG_LEVEL: ${CONDUIT_LOG_LEVEL:-info}
+    restart: "no"
 
   app:
     build: .
     depends_on:
-      kafka:
-        condition: service_healthy
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      redis-2:
-        condition: service_healthy
-      redis-3:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     env_file:
       - .env
     # These override .env when set in the host shell, which is how
     # loadtest/measure.sh drives its A/B runs without rewriting .env.
     environment:
+      # Postgres-only by default. `--profile kafka` plus CONDUIT_TRANSPORT=kafka
+      # and `--profile redis` plus CONDUIT_LOCK=redlock get the old stack back,
+      # which is what measure.sh does for its A/B runs.
+      CONDUIT_TRANSPORT: ${CONDUIT_TRANSPORT:-postgres}
+      CONDUIT_LOCK: ${CONDUIT_LOCK:-advisory}
       CONDUIT_API_KEYS: ${CONDUIT_API_KEYS:-}
       CONDUIT_TRUSTED_PROXIES: ${CONDUIT_TRUSTED_PROXIES:-}
       CONDUIT_REDIS_ADDRESSES: ${CONDUIT_REDIS_ADDRESSES:-redis:6379,redis-2:6379,redis-3:6379}
@@ -126,6 +158,7 @@ services:
 
   prometheus:
     image: prom/prometheus:latest
+    profiles: ["observability"]
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     command:
@@ -135,6 +168,7 @@ services:
 
   grafana:
     image: grafana/grafana:latest
+    profiles: ["observability"]
     depends_on:
       - prometheus
     environment:

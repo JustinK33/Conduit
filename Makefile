@@ -1,4 +1,4 @@
-.PHONY: up down restart logs ps test test-race bench vet build tidy enqueue enqueue-elt status list ready worker measure
+.PHONY: up up-full down restart logs ps test test-race bench vet build tidy migrate enqueue enqueue-elt status list ready worker measure
 
 # Every target below that talks to the API sends this. It is empty by default,
 # which is right for a local stack with no keys set; export API_KEY (or put it in
@@ -6,13 +6,21 @@
 AUTH := $(if $(API_KEY),-H "Authorization: Bearer $(API_KEY)",)
 BASE_URL ?= http://localhost:8080
 
-# Start the full stack (builds the app image, waits for health checks)
+# Start the stack: Postgres, one migration run, and the app. That is all Conduit
+# needs.
 up:
 	docker compose up -d --build
 
-# Stop the stack and wipe volumes (fresh state on next `make up`)
+# Add Kafka, Redlock, Prometheus, and Grafana. Neither buys a correctness
+# property - see the README's measurements - so this is for reproducing them.
+up-full:
+	CONDUIT_TRANSPORT=kafka CONDUIT_LOCK=redlock \
+		docker compose --profile kafka --profile redis --profile observability up -d --build
+
+# Stop the stack and wipe volumes (fresh state on next `make up`). Every profile,
+# so a container started by up-full is not left behind holding the network.
 down:
-	docker compose down -v
+	docker compose --profile kafka --profile redis --profile observability --profile loadtest down -v --remove-orphans
 
 # Full restart: wipe and rebuild from scratch
 restart: down up
@@ -42,7 +50,7 @@ bench:
 # recreates the app container repeatedly, so do not run it against a stack you
 # are using for anything else.
 measure:
-	docker compose --profile loadtest up -d --wait
+	docker compose --profile kafka --profile redis --profile loadtest up -d --wait
 	./loadtest/measure.sh all
 
 # Run the Go static analyzer
@@ -56,6 +64,11 @@ build:
 # Download dependencies and tidy go.sum
 tidy:
 	go mod tidy
+
+# Apply pending migrations against a running Postgres. `make up` already does
+# this; run it by hand after adding a migration to an existing stack.
+migrate:
+	docker compose run --rm migrate
 
 # Enqueue a webhook job - usage: make enqueue url=https://example.com/webhook
 enqueue:

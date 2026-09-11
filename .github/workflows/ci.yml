@@ -79,23 +79,22 @@ jobs:
       - name: Make binary executable
         run: chmod +x bin/conduit
 
+      # Postgres alone, which is the default configuration and so the one worth
+      # load-testing. The Kafka and Redis paths are covered by unit tests and by
+      # loadtest/measure.sh, which runs them explicitly for its A/B numbers.
       - name: Start infrastructure
-        run: |
-          docker compose up -d --wait kafka redis redis-2 redis-3 postgres
-          docker exec -i conduit-postgres-1 psql -U conduit -d conduit < migrations/001_create_jobs.sql
+        run: docker compose up -d --wait postgres
+
+      - name: Apply migrations
+        env:
+          CONDUIT_POSTGRES_DSN: postgres://conduit:conduit@localhost:5433/conduit?sslmode=disable
+        run: bin/conduit migrate
 
       - name: Start server
         env:
           CONDUIT_POSTGRES_DSN: postgres://conduit:conduit@localhost:5433/conduit?sslmode=disable
-          CONDUIT_KAFKA_BROKERS: localhost:9092
-          CONDUIT_KAFKA_TOPIC: jobs
-          CONDUIT_REDIS_ADDRESSES: localhost:6379,localhost:6380,localhost:6381
           CONDUIT_WORKER_CONCURRENCY: "50"
           CONDUIT_WORKER_QUEUE_SIZE: "500"
-          CONDUIT_KAFKA_COMPRESSION_CODEC: "2"
-          CONDUIT_KAFKA_FLUSH_FREQUENCY_MS: "5"
-          CONDUIT_KAFKA_FLUSH_BYTES: "1048576"
-          CONDUIT_KAFKA_CHANNEL_BUFFER_SIZE: "256"
           CONDUIT_POSTGRES_MAX_CONNS: "50"
           CONDUIT_POSTGRES_MIN_CONNS: "10"
           CONDUIT_HTTP_ADDRESS: ":8080"

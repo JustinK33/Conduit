@@ -22,6 +22,11 @@ func (o osEnv) LookupEnv(key string) (string, bool) { return os.LookupEnv(key) }
 
 func Default() models.Config {
 	return models.Config{
+		// Postgres-only by default, so the quickstart is one container plus a
+		// database. Kafka buys dispatch latency and Redlock buys nothing
+		// measurable; neither is worth being mandatory.
+		Transport: models.TransportPostgres,
+		Lock:      models.LockAdvisory,
 		HTTP: models.HTTPConfig{
 			Address:      ":8080",
 			ReadTimeout:  15 * time.Second,
@@ -110,6 +115,9 @@ func LoadFromEnvironment(env Environment) (models.Config, error) {
 	cfg := Default()
 	p := envParser{env: env}
 
+	p.str("TRANSPORT", &cfg.Transport)
+	p.str("LOCK", &cfg.Lock)
+
 	p.str("HTTP_ADDRESS", &cfg.HTTP.Address)
 	p.dur("HTTP_READ_TIMEOUT", &cfg.HTTP.ReadTimeout)
 	p.dur("HTTP_WRITE_TIMEOUT", &cfg.HTTP.WriteTimeout)
@@ -178,12 +186,38 @@ func Validate(cfg models.Config) error {
 	if cfg.Postgres.DSN == "" {
 		return fmt.Errorf("config: CONDUIT_POSTGRES_DSN is required")
 	}
-	if len(cfg.Kafka.Brokers) == 0 {
-		return fmt.Errorf("config: CONDUIT_KAFKA_BROKERS is required")
+
+	// An unrecognised value is rejected rather than falling back to the default.
+	// Silently reading CONDUIT_LOCK=redlok as "none" would turn a typo into a
+	// missing guard, and CONDUIT_TRANSPORT=kafla into a broker nobody notices is
+	// unused.
+	switch cfg.Transport {
+	case models.TransportPostgres:
+	case models.TransportKafka:
+		// Only required for the Kafka transport: with the Postgres transport no
+		// client is constructed, so a blank broker list is not a misconfiguration.
+		if len(cfg.Kafka.Brokers) == 0 {
+			return fmt.Errorf("config: CONDUIT_KAFKA_BROKERS is required for CONDUIT_TRANSPORT=kafka")
+		}
+		if cfg.Kafka.Topic == "" {
+			return fmt.Errorf("config: CONDUIT_KAFKA_TOPIC is required for CONDUIT_TRANSPORT=kafka")
+		}
+	default:
+		return fmt.Errorf("config: CONDUIT_TRANSPORT must be %q or %q, got %q",
+			models.TransportPostgres, models.TransportKafka, cfg.Transport)
 	}
-	if cfg.Kafka.Topic == "" {
-		return fmt.Errorf("config: CONDUIT_KAFKA_TOPIC is required")
+
+	switch cfg.Lock {
+	case models.LockNone, models.LockAdvisory:
+	case models.LockRedlock:
+		if len(cfg.Redis.Addresses) == 0 {
+			return fmt.Errorf("config: CONDUIT_REDIS_ADDRESSES is required for CONDUIT_LOCK=redlock")
+		}
+	default:
+		return fmt.Errorf("config: CONDUIT_LOCK must be %q, %q, or %q, got %q",
+			models.LockNone, models.LockAdvisory, models.LockRedlock, cfg.Lock)
 	}
+
 	if cfg.Worker.Concurrency <= 0 {
 		return fmt.Errorf("config: CONDUIT_WORKER_CONCURRENCY must be > 0, got %d", cfg.Worker.Concurrency)
 	}

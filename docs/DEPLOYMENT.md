@@ -20,7 +20,7 @@ That is correct inside a private network and dangerous the moment the port is pu
 | --- | --- | --- |
 | `/api/jobs/*` | `CONDUIT_API_KEYS`, when set | Clients and workers, over TLS |
 | `/live` | None | Anyone; it touches no dependency and reveals only that the process is up |
-| `/ready` | None | Private only. It names the liveness of Postgres and every Redis node. |
+| `/ready` | None | Private only. It names the liveness of Postgres, and of every Redis node when `CONDUIT_LOCK=redlock`. |
 | `/health` | None | Private only. Alias of `/live`, kept for compatibility. |
 | `/metrics` | None | Private only. Queue depth, throughput, failure counts. |
 
@@ -84,7 +84,7 @@ queue.example.com {
 
 	# Everything else is private, and that is deliberate rather than an
 	# oversight. /metrics is queue depth and failure counts. /ready and
-	# /health name the state of Postgres and every Redis node. All three
+	# /health name the state of Postgres and any Redis node. All three
 	# are unauthenticated inside Conduit so that probes and Prometheus
 	# work, which means this block is what keeps them off the internet.
 	handle {
@@ -168,6 +168,15 @@ Each key must be at least 16 characters or the server refuses to start.
 
 Keys go in `.env` or a Secret. Never in a config file that is committed, and never in a ConfigMap.
 
+## Migrations
+
+`conduit migrate` applies every file in `migrations/` in filename order, records each one in `schema_migrations`, and takes an advisory lock first so concurrent runs serialise instead of racing.
+Applying twice is a no-op, which is what makes it safe to run unconditionally on every boot.
+
+- Compose runs it for you: the `migrate` service is a `depends_on: service_completed_successfully` gate in front of `app`, so `docker compose up` cannot start a server against an unmigrated database.
+- Kubernetes runs it as an init container on every replica. The second and third pods find nothing to do. An init container rather than a `Job` because it also covers the rollout case, where a new image's schema has to land before that image starts serving.
+- Outside a container: `./bin/conduit migrate`, with `CONDUIT_POSTGRES_MIGRATIONS_PATH` pointing at the directory if you are not running from the repository root.
+
 ## Checklist
 
 - [ ] `CONDUIT_API_KEYS` set to at least one 32-byte random key. Absent means the API is open, and the server warns about it at boot.
@@ -177,10 +186,10 @@ Keys go in `.env` or a Secret. Never in a config file that is committed, and nev
 - [ ] `CONDUIT_TRUSTED_PROXIES` matching the proxy's network, or empty.
 - [ ] `CONDUIT_WORKER_QUEUES` set if remote workers exist, or the server competes for their jobs and dead-letters them. See [WORKERS.md](WORKERS.md).
 - [ ] `CONDUIT_POSTGRES_DSN` pointing at a database with backups. Postgres is the source of truth; losing it loses the queue.
+- [ ] `conduit migrate` run against the target database, by the compose service, the init container, or by hand.
 
 ## Known gaps
 
-- **Migrations only run on a fresh volume.** The schema is applied by mounting `migrations/` into the Postgres entrypoint, which runs once on an empty data directory. A schema change does not reach an existing database. A `migrate` subcommand is [phase 3](ROADMAP.md#phase-3---kafka-and-redis-become-optional).
 - **`CONDUIT_METRICS_LISTEN_ADDRESS` is parsed and ignored.** `/metrics` is served on the main HTTP port, which is why the proxy has to gate it. A separate metrics listener would be the better answer.
 - **The API key is all-or-nothing.** Holding it means claiming, cancelling, and reading every job. Per-key identity is [phase 2](ROADMAP.md#phase-2---more-than-one-tenant).
 - **`deploy/k8s/deployment.yaml` names `conduit:latest`**, which resolves to nothing. Point it at your registry until [phase 6](ROADMAP.md#phase-6---something-an-adopter-can-actually-pin) lands published images.

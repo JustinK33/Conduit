@@ -1,7 +1,22 @@
 # 0003. Redlock over Postgres advisory locks, and why it matters less than it looks
 
-Status: accepted, with reservations recorded below.
+Status: reversed 2026-09 by `CONDUIT_LOCK`, for the reason this record already names.
 Date: 2025-07 (`a8cb35f`).
+
+`CONDUIT_LOCK` now selects `advisory` (the default, `pg_try_advisory_lock`), `redlock`, or `none`.
+This record ends by saying Redlock "stands because the connection cost is real ... That is a preference, not a proof."
+The connection cost turned out to be avoidable, so the preference lost.
+
+The cost this record measured was one held connection **per in-flight job**, which came from reaching for `pg_advisory_xact_lock` inside the claim transaction.
+`internal/lock/postgres.go` uses a session lock instead, on one dedicated connection shared by every lock the process holds, so the cost is one connection per process rather than `CONDUIT_WORKER_CONCURRENCY` of them.
+An in-process `held` set does the rest, because a single session can take the same key twice and so cannot exclude the process from itself.
+
+That also buys a property Redlock cannot have, and the one this record's own "Also unfixed" paragraph is about.
+A session lock is released by the server the moment it notices the connection is gone, so a `SIGKILL`ed process needs no TTL and no renewal loop.
+Measured on the crash scenario in the README: under Redlock the gap between the last requeue and the last terminal state was 7 to 21 seconds (and 920 in one outlier), spent churning claim-and-release against keys the dead process still owned; under advisory locks it is 0.1 seconds.
+
+Everything below about what a lock does *not* buy is unchanged and is the more important half of this record.
+`lease_token` is still the correctness mechanism, and `CONDUIT_LOCK=none` is offered precisely because that is true: with the Postgres transport every dispatch already goes through one atomic `FOR UPDATE SKIP LOCKED` claim, so there is no second instance to exclude.
 
 ## Context
 

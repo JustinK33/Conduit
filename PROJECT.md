@@ -6,7 +6,7 @@ A production-grade **distributed task queue** written in Go - built from scratch
 
 ## What It Does
 
-Conduit is an HTTP-driven job queue service that accepts work from callers, durably persists it in PostgreSQL, publishes it to a Kafka topic, and executes it either through its own bounded worker pool or through workers you write that claim jobs over HTTP - all with automatic retries, distributed locking, circuit-breaking, and Prometheus observability.
+Conduit is an HTTP-driven job queue service that accepts work from callers, durably persists it in PostgreSQL, wakes a worker over `LISTEN`/`NOTIFY` (or Kafka), and executes it either through its own bounded worker pool or through workers you write that claim jobs over HTTP - all with automatic retries, distributed locking, circuit-breaking, and Prometheus observability.
 
 ```
 Client
@@ -15,9 +15,9 @@ Client
 API Handler (Gin)
   │  Enqueue(job)
   ▼
-Job Service ──────────────► Kafka topic "conduit.jobs"
+Job Service ──────────────► transport: pg_notify (default) or Kafka
   │  CreateJob                   │
-  ▼                              │ Consume (filtered by queue)
+  ▼                              │ wake-up / consume
 PostgreSQL                  Worker Pool ──► JobRunner
   │  PENDING → RUNNING               │
   │  RUNNING → COMPLETED             │ Retry Engine
@@ -25,8 +25,8 @@ PostgreSQL                  Worker Pool ──► JobRunner
  State Machine               Circuit Breaker
                                     │
  Scheduler ──── cron entries        ▼
- (recurring jobs)           Redis Distributed Lock
-                                    │
+ (recurring jobs)           execution lock: pg_try_advisory_lock
+                                    │  (default) or Redis Redlock
  Prometheus /metrics         observability
 
 Your worker, anywhere
@@ -43,11 +43,11 @@ Job Service - same methods, same retry policy
 | Feature | Details |
 |---|---|
 | **Async job dispatch** | HTTP POST enqueues a job; returns the ID immediately |
-| **Kafka transport** | Durable publish with per-message headers for tracing |
+| **Pluggable transport** | `CONDUIT_TRANSPORT=postgres` (default) sends wake-ups over `LISTEN`/`NOTIFY`; `kafka` publishes durably with per-message headers for tracing. Neither carries authority, so neither can lose a job. |
 | **PostgreSQL state machine** | `PENDING → RUNNING → COMPLETED / DEAD` with `FOR UPDATE SKIP LOCKED` claim; a retry is one statement back to `PENDING` |
 | **Worker pull API** | Claim, heartbeat, complete, fail over HTTP, so a worker can be any language on any host. `lease_token` is both the fencing token and the per-claim credential. |
 | **API-key auth** | Bearer tokens on `/api/jobs`, constant-time compared, multiple keys for rotation |
-| **Redlock distributed locking** | Multi-node quorum lock for exclusive resource coordination |
+| **Pluggable execution lock** | `CONDUIT_LOCK=advisory` (default) uses `pg_try_advisory_lock`; `redlock` uses a multi-node Redis quorum; `none` relies on the atomic claim alone. Guards duplicated effort, not correctness. |
 | **Exponential backoff** | Configurable base, multiplier, cap, and jitter |
 | **Circuit breaker** | Closed / Open / Half-Open state machine protecting downstream calls |
 | **Cron scheduler** | 5-field cron expressions with `*/n`, ranges, and lists - zero external dependencies |
@@ -55,7 +55,8 @@ Job Service - same methods, same retry policy
 | **Prometheus metrics** | Counters, gauges, histograms exposed on `/metrics` |
 | **Structured logging** | zerolog JSON logs with service/env/component fields |
 | **Graceful shutdown** | SIGTERM drains in-flight jobs before exit |
-| **Fully tested** | All packages tested with `-race`; the store integration test is gated behind `POSTGRES_TEST_DSN` |
+| **Schema migrations** | `conduit migrate` applies `migrations/` under an advisory lock, recording each file in `schema_migrations`, so it is safe to run on every boot and from every replica |
+| **Fully tested** | All packages tested with `-race`; the store and advisory-lock integration tests are gated behind `POSTGRES_TEST_DSN` |
 
 ---
 
@@ -69,17 +70,17 @@ internal/
   api/               ← Gin handlers: enqueue, read, cancel, the worker pull protocol, API-key auth
   config/            ← env-var config loading + validation
   circuitbreaker/    ← Closed / Open / Half-Open state machine
-  lock/              ← Redlock algorithm over multiple Redis nodes
+  lock/              ← Postgres advisory locks (default), Redlock, no-op
   logger/            ← zerolog setup (JSON + pretty modes)
   metrics/           ← Prometheus counter/gauge/histogram registry
-  queue/             ← Sarama Kafka producer + consumer group
+  queue/             ← pg_notify listener (default), Sarama producer + consumer group
   retry/             ← exponential backoff + jitter engine
   scheduler/         ← cron scheduler with built-in 5-field parser
-  service/           ← Queue adapter: bridges API ↔ Kafka + Postgres; owns the retry decision
+  service/           ← Queue adapter: bridges API ↔ transport + Postgres; owns the retry decision
   store/             ← pgx v5 CRUD + state machine + `FOR UPDATE SKIP LOCKED`
   worker/            ← goroutine pool with semaphore and WaitGroup
 pkg/models/          ← shared domain types (Job, Task, JobState, Config)
-migrations/          ← SQL schema (001_create_jobs.sql)
+migrations/          ← SQL schema, applied in order by `conduit migrate`
 loadtest/            ← k6 script, measurement harness, worker.sh reference worker
 deploy/prometheus/   ← prometheus.yml scrape config
 ```
@@ -92,12 +93,12 @@ deploy/prometheus/   ← prometheus.yml scrape config
 |---|---|
 | Language | Go 1.23 |
 | HTTP | Gin (`github.com/gin-gonic/gin`) |
-| Message queue | Apache Kafka via IBM Sarama (`github.com/IBM/sarama`) |
+| Transport | Postgres `LISTEN`/`NOTIFY` by default; Apache Kafka via IBM Sarama (`github.com/IBM/sarama`) optionally |
 | Database | PostgreSQL 16 via pgx v5 (`github.com/jackc/pgx/v5`) |
-| Caching / Locking | Redis 7 via go-redis v9 (`github.com/redis/go-redis/v9`) |
+| Execution lock | `pg_try_advisory_lock` by default; Redis 7 Redlock via go-redis v9 (`github.com/redis/go-redis/v9`) optionally |
 | Observability | Prometheus (`github.com/prometheus/client_golang`) |
 | Logging | zerolog (`github.com/rs/zerolog`) |
-| Containerisation | Docker Compose (Kafka, Postgres, 3× Redis, Prometheus, Grafana) |
+| Containerisation | Docker Compose (Postgres by default; Kafka, 3× Redis, Prometheus, Grafana behind profiles) |
 | Orchestration | Kubernetes - Deployment (3 replicas), Service, HPA (min 3 / max 10) |
 | CI/CD | GitHub Actions - vet → unit tests → race detector → Docker build → k6 load test |
 
@@ -118,7 +119,7 @@ deploy/prometheus/   ← prometheus.yml scrape config
 | `POST` | `/api/jobs/:id/fail` | Report failure; returns `{state, attempt, scheduled_at}` |
 | `GET` | `/metrics` | Prometheus scrape endpoint |
 | `GET` | `/live` | Liveness probe (process only) |
-| `GET` | `/ready` | Readiness probe (checks Postgres and Redis) |
+| `GET` | `/ready` | Readiness probe (checks Postgres, plus the Redis quorum when Redlock is on) |
 | `GET` | `/health` | Combined health summary |
 
 `state` must be one of `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `DEAD`, though `FAILED` is unreachable: nothing writes it, and a retrying job is `PENDING` with `attempt > 0`.
@@ -181,13 +182,13 @@ All metrics are prefixed `conduit_service_*` by default (configurable via `CONDU
 ## Running Locally
 
 ```bash
-# Infrastructure only, so the server can run outside Docker.
-# `make up` instead brings up the app container too, and Postgres applies
-# migrations/ automatically on first boot either way.
-docker compose up -d kafka redis redis-2 redis-3 postgres
+# Infrastructure only, so the server can run outside Docker. `make up` instead
+# brings up the app container too, and runs the migrate service before it.
+docker compose up -d postgres
 
-# Build and run
+# Build, apply the schema, run
 make build
+./bin/conduit migrate
 ./bin/conduit
 
 # In another terminal, enqueue a test job. `webhook` and `sql.etl` are the only
@@ -212,9 +213,11 @@ Every variable Conduit reads is prefixed `CONDUIT_`, and an unprefixed name is i
 | Variable | Default | Description |
 |---|---|---|
 | `CONDUIT_POSTGRES_DSN` | `postgres://postgres:postgres@localhost:5432/conduit?sslmode=disable` | PostgreSQL connection string |
-| `CONDUIT_KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker list |
+| `CONDUIT_TRANSPORT` | `postgres` | `postgres` (`LISTEN`/`NOTIFY`, no broker) or `kafka`. An unrecognised value is a boot error. |
+| `CONDUIT_LOCK` | `advisory` | `advisory` (`pg_try_advisory_lock`), `redlock`, or `none`. An unrecognised value is a boot error. |
+| `CONDUIT_KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker list. Read only when `CONDUIT_TRANSPORT=kafka`, and required then. |
 | `CONDUIT_KAFKA_TOPIC` | `conduit.jobs` | Topic for job messages |
-| `CONDUIT_REDIS_ADDRESSES` | `localhost:6379,localhost:6380,localhost:6381` | Comma-separated Redis addresses |
+| `CONDUIT_REDIS_ADDRESSES` | `localhost:6379,localhost:6380,localhost:6381` | Comma-separated Redis addresses. Read only when `CONDUIT_LOCK=redlock`, and required then. |
 | `CONDUIT_HTTP_ADDRESS` | `:8080` | Server listen address. Set it to `127.0.0.1:8080` behind a local proxy. |
 | `CONDUIT_API_KEYS` | empty | Comma-separated bearer tokens for `/api/jobs`, 16 characters minimum. Empty means the API is open. |
 | `CONDUIT_TRUSTED_PROXIES` | empty | CIDRs whose `X-Forwarded-For` is believed. Empty trusts nothing and uses the peer address. |
@@ -247,7 +250,7 @@ make bench
 | Go packages | 13 |
 | Source lines (production) | ~1 600 |
 | Test coverage | all packages (`-race` clean) |
-| Infrastructure components | Kafka, PostgreSQL, 3× Redis, Prometheus, Grafana |
+| Infrastructure components | PostgreSQL. Kafka, 3× Redis, Prometheus, and Grafana are optional, behind compose profiles. |
 | Kubernetes manifests | Deployment, Service, ConfigMap, HPA |
 | API endpoints | 9 job routes plus 4 operational |
 | Prometheus metrics | 8 |
@@ -260,8 +263,8 @@ make bench
 Every measured number lives in one place: the [Measured results](README.md#measured-results) section of the README, reproducible with `make measure`.
 
 The tuning that drove the intake numbers:
-- Made Kafka publish non-blocking (goroutine after Postgres write) - removed the Kafka round-trip from the HTTP hot path
+- Made the transport publish non-blocking (goroutine after the Postgres write) - removed the broker round trip from the HTTP hot path
 - pgx pool: MaxConns 25 → 50, added MaxConnLifetime / MaxConnIdleTime / HealthCheckPeriod
-- Kafka producer: snappy compression, 5ms flush frequency, 1MiB flush threshold, 256-deep channel buffer
+- Kafka producer, when selected: snappy compression, 5ms flush frequency, 1MiB flush threshold, 256-deep channel buffer
 
 `CONDUIT_WORKER_QUEUE_SIZE` is the knob that dominates execution throughput, not `CONDUIT_WORKER_CONCURRENCY`; the README explains why.

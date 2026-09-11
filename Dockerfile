@@ -17,6 +17,10 @@ WORKDIR /
 
 COPY --from=builder /out/conduit /conduit
 
+# `conduit migrate` reads these at runtime, so they have to be in the image.
+# CONDUIT_POSTGRES_MIGRATIONS_PATH defaults to "migrations" relative to WORKDIR.
+COPY --from=builder /src/migrations /migrations
+
 EXPOSE 8080
 
 USER nonroot:nonroot

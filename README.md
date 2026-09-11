@@ -14,11 +14,15 @@ Your code runs it one of two ways.
 Either a worker you write in any language claims jobs over HTTP and reports the outcome back, which is the pull API in [docs/WORKERS.md](docs/WORKERS.md), or you use one of the two handlers that ship in-process: `webhook` for outbound HTTP delivery and `sql.etl` for Postgres-to-Postgres pipelines defined in JSON.
 A remote worker gets the same lease, the same fencing token, and the same retry policy as an in-process one, because both paths write through the same code.
 
-The design decision everything else follows from is that Kafka holds no authority.
-A job is durable the moment the Postgres insert commits, and the Kafka publish happens afterwards in a goroutine, so the HTTP response doesn't wait on a broker round trip.
-That would normally be a data-loss bug, since a dropped publish means nothing ever consumes the job.
+The design decision everything else follows from is that the transport holds no authority.
+A job is durable the moment the Postgres insert commits, and the wake-up to a worker happens afterwards, so the HTTP response doesn't wait on it.
+That would normally be a data-loss bug, since a dropped wake-up means nothing ever consumes the job.
 It isn't one here, because the reconciler polls Postgres directly with `FOR UPDATE SKIP LOCKED` and feeds the same worker pool.
-Kafka is the fast path and the database is the floor.
+The transport is the fast path and the database is the floor.
+
+That is what lets the whole thing be two containers.
+The default `CONDUIT_TRANSPORT=postgres` sends wake-ups over `LISTEN`/`NOTIFY` and the default `CONDUIT_LOCK=advisory` guards execution with `pg_try_advisory_lock`, so an install is Postgres and one process.
+Kafka and a three-node Redis Redlock quorum are still there, one environment variable away, and the [measurements below](#what-kafka-buys) are what they buy.
 
 Crash recovery works the same way rather than being a separate mechanism.
 A worker that claims a job takes a lease with an expiry and renews it while running, so a process that dies mid-job leaves a `RUNNING` row with a stale `lease_expires_at`.
@@ -33,12 +37,12 @@ flowchart TD
     client["HTTP client"] -->|"POST /api/jobs"| api["internal/api<br/>Gin, request id, error envelope"]
     api --> svc["internal/service<br/>JobService"]
     svc -->|"CreateJob, PENDING, synchronous"| pg[("Postgres<br/>jobs, source of truth")]
-    svc -.->|"Publish to topic jobs, in a goroutine"| kafka["Kafka<br/>transport only"]
-    kafka -->|"consumer group, filtered by queue"| pool["internal/worker<br/>semaphore-bounded pool"]
+    svc -.->|"wake-up, after the commit"| transport["transport<br/>pg_notify (default) or Kafka"]
+    transport -->|"wake the reconciler / consume by queue"| pool["internal/worker<br/>semaphore-bounded pool"]
     pg -->|"ClaimNextJob, FOR UPDATE SKIP LOCKED"| recon["internal/reconciler<br/>polls, requeues expired leases"]
     recon --> pool
-    pool --> jw["jobWorker<br/>breaker, Redlock, lease renewal"]
-    jw -->|"SET NX on job:exec:id"| redis[("Redis x3<br/>Redlock quorum")]
+    pool --> jw["jobWorker<br/>breaker, exec lock, lease renewal"]
+    jw -->|"job:exec:id"| locker[("pg_try_advisory_lock (default)<br/>or Redis x3 Redlock")]
     jw -->|"dispatch by task.name"| handlers["internal/webhook<br/>internal/etl"]
     jw -->|"Complete / Fail, fenced on lease_token"| svc
     remote["your worker<br/>any language, any host"] -->|"POST /api/jobs/claim"| api
@@ -47,13 +51,15 @@ flowchart TD
     jw --> prom["Prometheus /metrics"]
 ```
 
-An enqueue writes the job to Postgres as `PENDING` and returns; the publish to Kafka is fire-and-forget behind it.
-A consumer hands the message to the worker pool, which is bounded by a semaphore and a buffered channel, and `jobWorker` does the four things that have to happen in order: ask the circuit breaker, take the Redlock so two instances consuming the same topic can't run one job twice, execute the registered handler under `Task.Timeout`, then report the outcome back through `JobService`.
+An enqueue writes the job to Postgres as `PENDING` and returns; the wake-up behind it is fire-and-forget.
+On the default transport that wake-up is a `pg_notify` carrying the job id, which cuts the reconciler's sleep short so it claims immediately instead of at the end of its idle interval; on the Kafka transport a consumer group delivers the message directly.
+Either way the job reaches the worker pool, which is bounded by a semaphore and a buffered channel, and `jobWorker` does the four things that have to happen in order: ask the circuit breaker, take the execution lock so two instances can't run one job twice, execute the registered handler under `Task.Timeout`, then report the outcome back through `JobService`.
 A remote worker enters at the same place from the other side: it claims a job, which is one `FOR UPDATE SKIP LOCKED` statement that hands back the row and its `lease_token`, and reports the outcome with that token.
 Both paths end in the same two compare-and-swap statements, so a job's fate is written the same way whoever ran it.
 
 A retryable failure computes a backoff delay and moves the job `RUNNING -> PENDING` with a future `scheduled_at` in one statement; an unknown task name goes straight to `DEAD` rather than looping.
-The reconciler runs on its own ticker doing the two jobs Kafka can't: pulling `PENDING` work the broker never delivered, and rescuing `RUNNING` rows whose lease ran out.
+The reconciler runs on its own ticker doing the two jobs no transport can: pulling `PENDING` work that was never delivered, and rescuing `RUNNING` rows whose lease ran out.
+It is also the reason a transport is optional at all - it is already the guaranteed delivery path, so the transport only ever makes dispatch faster.
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the full diagram, the state machine, and a per-package breakdown.
 [docs/decisions/](docs/decisions/) has the six decisions that shaped it, each with its costs written out.
@@ -65,7 +71,11 @@ cp .env.example .env
 make up
 ```
 
-That brings up the app, Postgres, Kafka, three Redis nodes, Prometheus, and Grafana, gated on health checks so the app doesn't start before its dependencies.
+That brings up Postgres, one migration run, and the app, gated on health checks so the app doesn't start before its schema exists.
+Nothing else is required.
+
+Kafka, Redis, Prometheus, and Grafana are behind compose profiles.
+`make up-full` starts all of them and points the app at them, which is what reproducing the measurements below needs.
 
 ```bash
 make enqueue url=https://example.com/webhook   # returns a job id
@@ -74,7 +84,7 @@ make list state=DEAD
 make ready                                     # per-dependency readiness
 ```
 
-`/live` always returns 200 and is what the Kubernetes liveness probe uses. `/ready` pings Postgres and the Redis quorum and returns 503 with per-dependency detail, which is what gates traffic.
+`/live` always returns 200 and is what the Kubernetes liveness probe uses. `/ready` pings Postgres, plus the Redis quorum when Redlock is on, and returns 503 with per-dependency detail, which is what gates traffic.
 
 `make enqueue-elt` runs the SQL pipeline example, and needs the demo tables from `migrations/002_create_elt_demo.sql`.
 
@@ -153,15 +163,23 @@ Anything in this table under a 2x difference is noise.
 
 | Dispatch path | p50 | p95 | max |
 | --- | --- | --- | --- |
+| Postgres `LISTEN`/`NOTIFY` (default) | 6.3, 6.5 ms | 8.9, 9.7 ms | 11.8, 13.7 ms |
 | Kafka consumer | 14.9 ms | 1,537.5 ms | 2,568.6 ms |
-| Reconciler only (broker killed) | 3,796.3 ms | 13,159.8 ms | 14,201.4 ms |
+| No transport at all (reconciler only) | 3,796.3 ms | 13,159.8 ms | 14,201.4 ms |
 
-Roughly 255x on median dispatch latency, and that is Kafka's entire contribution.
+The Postgres row is two runs, because beating Kafka on all three columns is a large enough claim to want it reproduced. It reproduced.
+
+Having a transport is worth roughly 600x on median dispatch latency.
+Which transport is Kafka's contribution, and the answer is that it costs.
 The reconciler-only numbers are not a bug: an idle reconciler backs off to `CONDUIT_RECONCILER_IDLE_INTERVAL=15s`, and a 13.2 s p95 is exactly what a 15 s poll looks like.
-Throughput is unaffected either way, because at volume both paths converge on the same worker pool.
+Throughput is unaffected by all three, because at volume every path converges on the same worker pool.
 
-One honest gap: Kafka is best-effort at runtime but mandatory at boot.
-`queue.NewKafkaClient` returns an error if the broker is unreachable and `run()` exits, so the design tolerates losing Kafka but not starting without it.
+The `NOTIFY` path wins because it does strictly less.
+A notification carries a job id and no authority, so all it does is cut the reconciler's sleep short and let the same `FOR UPDATE SKIP LOCKED` claim run immediately; the whole round trip is one `pg_notify` on a connection the app already holds.
+Kafka's p50 is a broker round trip on top of that, and its p95 is consumer-group rebalancing, which is the cost of a component that maintains its own partition assignment and offsets to deliver a payload that gets thrown away.
+
+That is the case for the default, and it also closes the gap this section used to end with: Kafka was best-effort at runtime but mandatory at boot, because `queue.NewKafkaClient` returned an error if the broker was unreachable and `run()` exited.
+It is now only constructed for `CONDUIT_TRANSPORT=kafka`, so the tolerance and the requirement finally agree.
 
 ### What Redlock buys
 
@@ -175,6 +193,10 @@ Same 2,000-job drain, three-node Redlock quorum versus a single Redis node.
 No measurable difference, and the ranges overlap completely.
 The quorum is not free (N acquire plus N release round trips per job, roughly 200 ms on the contended path), it is just far cheaper than the dispatch ceiling above it.
 It also isn't what makes execution safe: [ADR 0003](docs/decisions/0003-redlock-over-postgres-advisory-locks.md) explains why the `lease_token` fencing check in `UpdateJob` is the actual correctness mechanism and Redlock is defence against duplicated *effort*, like an outbound webhook no fencing token can undo.
+
+Which is why it is no longer the default.
+`CONDUIT_LOCK=advisory` gets the same defence out of `pg_try_advisory_lock` with no extra service, and one property Redlock cannot have: an advisory lock belongs to its database session, so a `SIGKILL`ed process releases every lock it held the moment the server notices the socket is gone.
+The crash numbers below are what that fixes.
 
 ### Crash recovery
 
@@ -191,6 +213,19 @@ The default `CONDUIT_RECONCILER_RUNNING_LEASE` is 5 minutes, so a real crash rec
 That 936.98 s outlier is not explainable from the code and did not reproduce in two subsequent runs, so it is reported rather than averaged away.
 What the logs *did* explain: after a `SIGKILL`, the dead process's `job:exec:<id>` Redlock keys survive with their full 30 s TTL, so the restarted process burns 300 lock-acquire failures and up to 16 attempts per job churning claim-and-release until they expire.
 Redlock's TTL is hardcoded and never renewed, which means a crash costs the lock TTL on top of the lease.
+
+Those runs were measured with Redlock. Re-run on the current default, `CONDUIT_LOCK=advisory`:
+
+| | Run 1 | Run 2 | Run 3 |
+| --- | --- | --- | --- |
+| All 20 requeued to `PENDING` | 24.73 s | 25.06 s | not observed |
+| All 20 terminal | 24.84 s | 25.17 s | 24.76 s |
+
+The requeue floor is unchanged, because it is the lease and never the lock.
+What changed is the gap between the two rows: 0.11 s here against 7 to 21 s under Redlock, and 920 s in that one outlier.
+That gap *was* the churn. An advisory lock belongs to a database session, so a `SIGKILL`ed process leaves nothing behind to wait out, and the restarted process claims each job once instead of fighting keys the dead process still owns.
+
+Run 3's blank is a sampling artifact, not a failure: the poller counts `RUNNING` rows every 250 ms, and with no lock churn to slow it down the requeue and the re-execution both landed inside one interval, so the count never read zero. All 20 still reached `COMPLETED`, in 24.76 s.
 
 ### Microbenchmarks
 
@@ -277,8 +312,8 @@ I built all three because I wanted to know exactly what each one cost, and now t
 - [PROJECT.md](PROJECT.md) has the API surface with curl examples and response shapes, plus the config table.
 - [docs/FEATURES.md](docs/FEATURES.md) goes deep on four pieces: the async publish and its tradeoff, Redlock, the Kubernetes manifests, and the CI/CD pipeline.
 - [docs/use-cases/sql-elt.md](docs/use-cases/sql-elt.md) walks a real pipeline config, with [examples/daily_revenue_pipeline.json](examples/daily_revenue_pipeline.json) as the input.
-- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API above; next is not needing Kafka and Redis to run it at all.
-- [migrations/](migrations/) is the schema, applied by Postgres on first boot.
+- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API above, phase 3 is the Postgres-only default; next is a release you can pin.
+- [migrations/](migrations/) is the schema, applied by `conduit migrate` (`make migrate`, and automatically on every `make up`).
 
 ## Tech stack
 
@@ -287,8 +322,8 @@ I built all three because I wanted to know exactly what each one cost, and now t
 | Language | Go 1.23 |
 | HTTP | Gin, with request-id, structured-logging, metrics, and panic-recovery middleware |
 | State | PostgreSQL via `pgx/v5`, pool tuned and exposed as env vars |
-| Transport | Kafka via IBM `sarama`, snappy compression, 5 ms flush |
-| Locking | Redis via `go-redis/v9`, 3-node Redlock quorum |
+| Transport | Postgres `LISTEN`/`NOTIFY` by default; Kafka via IBM `sarama` (snappy, 5 ms flush) with `CONDUIT_TRANSPORT=kafka` |
+| Locking | `pg_try_advisory_lock` by default; 3-node Redis Redlock via `go-redis/v9` with `CONDUIT_LOCK=redlock` |
 | Logs | `zerolog` |
 | Metrics | `prometheus/client_golang`, scraped by Prometheus, Grafana alongside |
 | Deploy | Docker Compose for local, Kubernetes manifests under `deploy/k8s` with an HPA |

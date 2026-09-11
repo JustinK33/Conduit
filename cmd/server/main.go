@@ -42,16 +42,40 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	// `conduit migrate` applies the schema and exits; anything else serves.
+	// Migrations used to be the Postgres entrypoint's job, which runs exactly
+	// once, on first boot, on an empty volume - so no schema change ever reached
+	// a database that already existed.
+	command := "serve"
+	if len(os.Args) > 1 {
+		command = os.Args[1]
+	}
+
+	var err error
+	switch command {
+	case "serve":
+		err = run(ctx)
+	case "migrate":
+		err = runMigrations(ctx)
+	default:
+		fmt.Fprintf(os.Stderr, "conduit: unknown command %q (want serve or migrate)\n", command)
+		os.Exit(2)
+	}
+
+	if err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "conduit: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context) error {
+// bootstrap does the three things both commands need: read the environment,
+// build the logger, and open the connection pool.
+func bootstrap(ctx context.Context) (models.Config, zerolog.Logger, *pgxpool.Pool, error) {
+	var nolog zerolog.Logger
+
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("config: %w", err)
+		return cfg, nolog, nil, fmt.Errorf("config: %w", err)
 	}
 
 	log, err := logger.New(logger.Config{
@@ -63,18 +87,13 @@ func run(ctx context.Context) error {
 		AddCaller:   cfg.Logger.AddCaller,
 	})
 	if err != nil {
-		return fmt.Errorf("logger: %w", err)
+		return cfg, nolog, nil, fmt.Errorf("logger: %w", err)
 	}
 	logger.ConfigureGlobal(log)
 
-	reg := metrics.NewRegistry(cfg.Metrics.Namespace, cfg.Metrics.Subsystem)
-	if err := reg.Register(prometheus.DefaultRegisterer); err != nil {
-		log.Warn().Err(err).Msg("metrics already registered")
-	}
-
 	pgCfg, err := pgxpool.ParseConfig(cfg.Postgres.DSN)
 	if err != nil {
-		return fmt.Errorf("postgres config: %w", err)
+		return cfg, log, nil, fmt.Errorf("postgres config: %w", err)
 	}
 	pgCfg.MaxConns = cfg.Postgres.MaxConns
 	pgCfg.MinConns = cfg.Postgres.MinConns
@@ -84,42 +103,98 @@ func run(ctx context.Context) error {
 
 	pgPool, err := pgxpool.NewWithConfig(ctx, pgCfg)
 	if err != nil {
-		return fmt.Errorf("postgres: %w", err)
+		return cfg, log, nil, fmt.Errorf("postgres: %w", err)
+	}
+	return cfg, log, pgPool, nil
+}
+
+func runMigrations(ctx context.Context) error {
+	cfg, log, pgPool, err := bootstrap(ctx)
+	if err != nil {
+		return err
 	}
 	defer pgPool.Close()
 
+	return store.Migrate(ctx, pgPool, cfg.Postgres.MigrationsPath, logger.WithComponent(log, "migrate"))
+}
+
+func run(ctx context.Context) error {
+	cfg, log, pgPool, err := bootstrap(ctx)
+	if err != nil {
+		return err
+	}
+	defer pgPool.Close()
+
+	reg := metrics.NewRegistry(cfg.Metrics.Namespace, cfg.Metrics.Subsystem)
+	if err := reg.Register(prometheus.DefaultRegisterer); err != nil {
+		log.Warn().Err(err).Msg("metrics already registered")
+	}
+
+	log.Info().Str("transport", cfg.Transport).Str("lock", cfg.Lock).Msg("dispatch configured")
+
 	jobStore := store.NewPostgresStore(pgPool, "jobs")
 
+	// Redis exists for one reason, Redlock, so it is only dialled when Redlock is
+	// what was asked for. An advisory lock is a Postgres session lock, and it
+	// dies with its connection instead of outliving a killed process the way a
+	// Redlock key does.
 	var redisClients []redis.UniversalClient
-	for _, addr := range cfg.Redis.Addresses {
-		redisClients = append(redisClients, redis.NewUniversalClient(&redis.UniversalOptions{
-			Addrs:    []string{addr},
-			Username: cfg.Redis.Username,
-			Password: cfg.Redis.Password,
-			DB:       cfg.Redis.Database,
-			PoolSize: cfg.Redis.PoolSize,
-		}))
-	}
-	defer func() {
-		for _, c := range redisClients {
-			c.Close()
+	var lockMgr jobLocker
+	switch cfg.Lock {
+	case models.LockRedlock:
+		for _, addr := range cfg.Redis.Addresses {
+			redisClients = append(redisClients, redis.NewUniversalClient(&redis.UniversalOptions{
+				Addrs:    []string{addr},
+				Username: cfg.Redis.Username,
+				Password: cfg.Redis.Password,
+				DB:       cfg.Redis.Database,
+				PoolSize: cfg.Redis.PoolSize,
+			}))
 		}
-	}()
-
-	// One lock manager shared across workers prevents duplicate execution of the same
-	// job ID across multiple service instances.
-	lockMgr := lock.NewManager(redisClients, lock.Config{
-		TTL:         30 * time.Second,
-		RetryCount:  3,
-		RetryDelay:  100 * time.Millisecond,
-		DriftFactor: 0.01,
-	})
-
-	kafkaClient, err := queue.NewKafkaClient(cfg.Kafka)
-	if err != nil {
-		return fmt.Errorf("kafka: %w", err)
+		defer func() {
+			for _, c := range redisClients {
+				c.Close()
+			}
+		}()
+		lockMgr = lock.NewManager(redisClients, lock.Config{
+			TTL:         30 * time.Second,
+			RetryCount:  3,
+			RetryDelay:  100 * time.Millisecond,
+			DriftFactor: 0.01,
+		})
+	case models.LockAdvisory:
+		advisory := lock.NewAdvisory(pgPool, logger.WithComponent(log, "lock"))
+		defer advisory.Close()
+		lockMgr = advisory
+	default:
+		// The Postgres transport dispatches only through ClaimNextJob, whose
+		// FOR UPDATE SKIP LOCKED claim is already atomic across instances, so
+		// nothing here needs a second guard. With the Kafka transport it does:
+		// a job arrives PENDING from the topic and two instances can both take it.
+		if cfg.Transport == models.TransportKafka {
+			log.Warn().Msg("CONDUIT_LOCK=none with CONDUIT_TRANSPORT=kafka: two instances consuming one topic can execute the same job twice")
+		}
+		lockMgr = lock.NoOp{}
 	}
-	defer kafkaClient.Close()
+
+	// Kafka's client is only built when Kafka is the transport, which is what
+	// makes the broker optional. Construction still fails hard when it is
+	// selected and unreachable; Compose's restart: on-failure covers the startup
+	// race, and the reconciler covers a broker that dies later.
+	var publisher service.Publisher
+	var kafkaClient *queue.KafkaClient
+	dispatchTarget := queue.NotifyChannel
+	if cfg.Transport == models.TransportKafka {
+		kafkaClient, err = queue.NewKafkaClient(cfg.Kafka)
+		if err != nil {
+			return fmt.Errorf("kafka: %w", err)
+		}
+		defer kafkaClient.Close()
+		publisher = kafkaClient
+		dispatchTarget = cfg.Kafka.Topic
+	} else {
+		publisher = queue.NewPostgresNotifier(pgPool)
+	}
 
 	breaker := circuitbreaker.New(circuitbreaker.Config{
 		FailureThreshold: 5,
@@ -136,7 +211,7 @@ func run(ctx context.Context) error {
 		Jitter:      0.1,
 	})
 
-	jobSvc := service.NewJobService(kafkaClient, jobStore, retryEngine, cfg.Kafka.Topic,
+	jobSvc := service.NewJobService(publisher, jobStore, retryEngine, dispatchTarget,
 		cfg.Reconciler.RunningLease, logger.WithComponent(log, "service"))
 
 	runner := &jobWorker{
@@ -171,21 +246,40 @@ func run(ctx context.Context) error {
 	}
 	defer jobReconciler.Stop()
 
-	consumerLog := logger.WithComponent(log, "consumer")
-	go func() {
-		h := &kafkaJobHandler{pool: workerPool, queues: cfg.Worker.Queues, log: consumerLog}
-		if err := kafkaClient.Consume(ctx, []string{cfg.Kafka.Topic}, h); err != nil && !errors.Is(err, context.Canceled) {
-			log.Error().Err(err).Msg("kafka consumer stopped")
-		}
-	}()
-	// Consumer.Return.Errors is on, so sarama pushes consume and rebalance
-	// failures onto this channel. Nothing read it before, which is why a
-	// consumer that stopped delivering jobs looked exactly like an idle one.
-	go func() {
-		for err := range kafkaClient.ConsumerGroup.Errors() {
-			consumerLog.Error().Err(err).Msg("kafka consumer group error")
-		}
-	}()
+	switch {
+	case kafkaClient != nil:
+		consumerLog := logger.WithComponent(log, "consumer")
+		go func() {
+			h := &kafkaJobHandler{pool: workerPool, queues: cfg.Worker.Queues, log: consumerLog}
+			if err := kafkaClient.Consume(ctx, []string{cfg.Kafka.Topic}, h); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error().Err(err).Msg("kafka consumer stopped")
+			}
+		}()
+		// Consumer.Return.Errors is on, so sarama pushes consume and rebalance
+		// failures onto this channel. Nothing read it before, which is why a
+		// consumer that stopped delivering jobs looked exactly like an idle one.
+		go func() {
+			for err := range kafkaClient.ConsumerGroup.Errors() {
+				consumerLog.Error().Err(err).Msg("kafka consumer group error")
+			}
+		}()
+
+	case cfg.Reconciler.Enabled:
+		// The Postgres transport's consume side. A notification only pokes the
+		// reconciler, which then claims through the same path it always uses, so
+		// the transport cannot double-dispatch and needs no queue filter of its
+		// own. Without this an enqueue onto an idle queue waits out
+		// CONDUIT_RECONCILER_IDLE_INTERVAL.
+		listener := queue.NewPostgresListener(cfg.Postgres.DSN, queue.NotifyChannel, logger.WithComponent(log, "notify"))
+		go listener.Run(ctx, jobReconciler.Wake)
+
+	default:
+		// Nothing consumes: no broker, and the reconciler that would have claimed
+		// the work is switched off. Correct for an API-only instance whose jobs
+		// are executed by remote workers over the pull API, and a silent black
+		// hole otherwise.
+		log.Warn().Msg("CONDUIT_RECONCILER_ENABLED=false with the postgres transport: this instance dispatches nothing to its own worker pool")
+	}
 
 	sched := scheduler.New(cfg.Scheduler.TickInterval)
 	if cfg.Scheduler.Enabled {
@@ -508,19 +602,24 @@ func readinessHandler(pg *pgxpool.Pool, redisClients []redis.UniversalClient, lo
 			checks["postgres"] = "ok"
 		}
 
-		alive := 0
-		for i, client := range redisClients {
-			if err := client.Ping(ctx).Err(); err != nil {
-				checks[fmt.Sprintf("redis[%d]", i)] = err.Error()
-				continue
+		// No clients means Redlock was not selected, so there is nothing to be
+		// ready for. Checking anyway would compute a quorum of 1 out of 0 nodes
+		// and report every Postgres-only deployment as permanently not ready.
+		if len(redisClients) > 0 {
+			alive := 0
+			for i, client := range redisClients {
+				if err := client.Ping(ctx).Err(); err != nil {
+					checks[fmt.Sprintf("redis[%d]", i)] = err.Error()
+					continue
+				}
+				checks[fmt.Sprintf("redis[%d]", i)] = "ok"
+				alive++
 			}
-			checks[fmt.Sprintf("redis[%d]", i)] = "ok"
-			alive++
-		}
-		quorum := len(redisClients)/2 + 1
-		if alive < quorum {
-			ok = false
-			checks["redis_quorum"] = fmt.Sprintf("%d/%d (need %d)", alive, len(redisClients), quorum)
+			quorum := len(redisClients)/2 + 1
+			if alive < quorum {
+				ok = false
+				checks["redis_quorum"] = fmt.Sprintf("%d/%d (need %d)", alive, len(redisClients), quorum)
+			}
 		}
 
 		status := http.StatusOK

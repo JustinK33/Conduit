@@ -19,6 +19,28 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 35
+      # Every replica runs this, and that is fine: migrations are recorded in
+      # schema_migrations and serialised on an advisory lock, so the second and
+      # third pods find nothing to do. An init container rather than a Job
+      # because it also covers the rollout case, where a new image's schema has
+      # to land before that image starts serving.
+      initContainers:
+        - name: migrate
+          image: conduit:latest
+          imagePullPolicy: IfNotPresent
+          args: ["migrate"]
+          envFrom:
+            - configMapRef:
+                name: conduit-config
+            - secretRef:
+                name: conduit-secrets
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
       containers:
         - name: conduit
           image: conduit:latest

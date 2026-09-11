@@ -51,14 +51,30 @@ Keys stop being a config list and become rows, which means a key store, hashed a
 
 **Done when** two API keys on one instance cannot see or claim each other's jobs, proven by a test that tries.
 
-## Phase 3 - Kafka and Redis become optional
+## Phase 3 - Kafka and Redis become optional (done)
 
-Conduit currently requires Kafka, Postgres, and three Redis nodes to start.
+Shipped. `docker compose up` is Postgres, one migration run, and the app; a job enqueued onto that stack reached `COMPLETED` in 96 ms.
+The dispatch table in the README has the Postgres row, and it is the fastest row in the table: p50 6.3 ms against Kafka's 14.9 ms and p95 8.9 ms against Kafka's 1,537.5 ms, reproduced across two runs.
+
+The original write-up follows, since the reasoning is still what the design is for.
+
+**The problem.** Conduit required Kafka, Postgres, and three Redis nodes to start.
 That is five services to deploy for a queue, and the measurements in the README say Kafka buys dispatch latency only, while the three-node Redlock quorum has no measurable throughput cost over a single node and no correctness role at all given Postgres is the source of truth.
-Kafka is mandatory at boot despite being explicitly best-effort at runtime, which is the worst of both.
+Kafka was mandatory at boot despite being explicitly best-effort at runtime, which is the worst of both.
 
-Needs `CONDUIT_TRANSPORT=postgres|kafka` where the Postgres path uses `LISTEN`/`NOTIFY` for wake-ups, and `CONDUIT_LOCK=none|advisory|redlock` where `advisory` uses a Postgres advisory lock.
-The default becomes Postgres-only, so the quickstart is one container plus a database.
+**The change.** `CONDUIT_TRANSPORT=postgres|kafka`, defaulting to `postgres`, which sends wake-ups over `LISTEN`/`NOTIFY`.
+A notification carries a job id and no authority: the reconciler's `FOR UPDATE SKIP LOCKED` claim is still the only thing that decides who executes, so all a notification does is cut the reconciler's sleep short.
+That is why it can be dropped for free, and why it needs no queue filter and has no payload ceiling to design around.
+
+`CONDUIT_LOCK=none|advisory|redlock`, defaulting to `advisory`, which uses `pg_try_advisory_lock` on a hashed job id.
+An unrecognised value for either is a boot error rather than a fallback to the default: reading `CONDUIT_LOCK=redlok` as `none` would turn a typo into a missing guard.
+
+`conduit migrate` came forward from phase 6, because the premise of this phase is false without it.
+Migrations used to be applied by mounting `migrations/` into the Postgres entrypoint, which runs exactly once, on first boot, on an empty volume, so phase 1's migration 003 reached no existing deployment at all.
+There is now exactly one mechanism: a `migrate` service that compose runs before the app on every `up`, recording each file in `schema_migrations` under an advisory lock so concurrent instances serialise.
+
+Kafka, Redis, Prometheus, and Grafana moved behind compose profiles.
+Compose rejects a `depends_on` that points at a profiled service, which is what turned "the app should tolerate them being absent" from a nice-to-have into a requirement the config layer enforces.
 
 **Done when** `docker compose up postgres app` is a working Conduit and the dispatch-latency table has a row for the Postgres transport.
 
@@ -87,10 +103,11 @@ Also in this phase: the circuit breaker is a single process-global instance, so 
 ## Phase 6 - Something an adopter can actually pin
 
 There are no tags, no releases, and no upgrade story.
-Migrations are applied by mounting `migrations/` into the Postgres entrypoint, which works exactly once, on first boot, on a fresh volume.
 
 - Tagged releases and a published container image an adopter can pin.
-- A real `migrate` subcommand, and the `server` / `worker` split that makes it natural.
+- A `needs: ci` gate on `cd.yml`, which currently publishes on any push to main even when CI is red.
+- `deploy/k8s/deployment.yaml`'s `image: conduit:latest` changed to the real GHCR path.
+- The `server` / `worker` split that the `migrate` subcommand made natural. `migrate` itself landed in phase 3, because the Postgres-only quickstart is not true without it.
 - A `docker run` quickstart that does not require cloning the repo.
 - One thin client library, in one language, so the API has at least one reference consumer.
 - A Kubernetes `Secret` template, since `deployment.yaml` references `conduit-secrets` and the repo contains no example of it.
@@ -110,13 +127,13 @@ Tracked here because it keeps recurring, not because it is a phase.
 Carried forward from `IMPROVEMENT_PLAN.md` so the history is not lost.
 Each of these has an ADR in [`docs/decisions/`](decisions/) explaining what it cost.
 
-- Postgres is the source of truth, with a reconciler that claims due `PENDING` jobs. Kafka is a wake-up path, not the queue.
+- Postgres is the source of truth, with a reconciler that claims due `PENDING` jobs. The transport is a wake-up path, not the queue, which is what made it optional in phase 3.
 - Durable leases with fencing tokens on `RUNNING` jobs, so a crashed worker's jobs return to `PENDING` once the lease expires.
 - `SELECT ... FOR UPDATE SKIP LOCKED` claims, so concurrent workers do not double-claim.
 - Server-owned lifecycle fields: an enqueue caller cannot set `state`, `attempt`, or the lease columns.
 - Explicit `idempotency_key` support, enforced by a unique partial index rather than by a read-then-write check.
 - Webhook execution as the first task mechanism, adoptable without recompiling Conduit.
-- Future-scheduled jobs are not published to Kafka at enqueue time.
+- Future-scheduled jobs get no wake-up at enqueue time.
 - Indexes for the list and state-filtered views.
 
 Two items from the old plan are deliberately not carried forward.

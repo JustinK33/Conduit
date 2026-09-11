@@ -1,8 +1,10 @@
 # Conduit Architecture
 
 Reliable data workflow runtime in Go.
-Jobs come in over HTTP, land in Postgres (durable), get fanned out through Kafka (transport), and are executed either by the bounded in-process worker pool or by a worker of your own that claims them over HTTP.
-Redis Redlock prevents duplicate execution when multiple instances run against the same topic.
+Jobs come in over HTTP, land in Postgres (durable), get a wake-up sent over the configured transport, and are executed either by the bounded in-process worker pool or by a worker of your own that claims them over HTTP.
+An execution lock prevents duplicate execution when multiple instances race for one job.
+Both of those are pluggable and default to Postgres: `CONDUIT_TRANSPORT=postgres` uses `LISTEN`/`NOTIFY` and `CONDUIT_LOCK=advisory` uses `pg_try_advisory_lock`, so a deployment is a database and one process.
+`CONDUIT_TRANSPORT=kafka` and `CONDUIT_LOCK=redlock` swap in Kafka and a three-node Redis quorum; see [decisions/0002](decisions/0002-kafka-as-transport-not-as-the-queue.md) and [0003](decisions/0003-redlock-over-postgres-advisory-locks.md) for what each costs.
 Built-in handlers include `webhook` delivery and `sql.etl` pipelines for Postgres-backed ELT workflows.
 See [WORKERS.md](WORKERS.md) for the pull protocol and [DEPLOYMENT.md](DEPLOYMENT.md) for what has to sit in front of the server.
 
@@ -29,31 +31,33 @@ See [WORKERS.md](WORKERS.md) for the pull protocol and [DEPLOYMENT.md](DEPLOYMEN
                    │                                       │
                    │  1. Generate UUID job ID              │
                    │  2. Persist job as PENDING  (sync)    │
-                   │  3. Publish to Kafka topic  (async)   │
+                   │  3. Publish a wake-up       (async)   │
                    └───────┬──────────────────┬───────────┘
                            │ CreateJob         │ Publish (goroutine)
                            ▼                   ▼
-              ┌──────────────────┐   ┌───────────────────────┐
-              │  PostgresStore   │   │     KafkaClient        │
-              │  (store/store)   │   │   (queue/kafka.go)     │
-              │                  │   │                        │
-              │  FOR UPDATE      │   │  Sarama SyncProducer   │
-              │  SKIP LOCKED     │   │  at-least-once         │
-              └──────────────────┘   └──────────┬────────────┘
-                  source of truth               │ topic: "jobs"
+              ┌──────────────────┐   ┌────────────────────────┐
+              │  PostgresStore   │   │  Publisher, one of:    │
+              │  (store/store)   │   │  PostgresNotifier      │
+              │                  │   │    (queue/postgres.go) │
+              │  FOR UPDATE      │   │  KafkaClient           │
+              │  SKIP LOCKED     │   │    (queue/kafka.go)    │
+              └──────────────────┘   └──────────┬─────────────┘
+                  source of truth               │
                                                 ▼
-                                     ┌──────────────────────┐
-                                     │     Kafka Broker      │
-                                     │   (durable log)       │
-                                     └──────────┬────────────┘
-                                                │ consumer group
-                                                ▼
-                                     ┌──────────────────────┐
-                                     │   kafkaJobHandler     │
-                                     │  (cmd/server/main)    │
-                                     │  Unmarshal → Submit   │
-                                     └──────────┬────────────┘
-                                                │
+                    ┌───────────────────────┬───────────────────────┐
+                    │  postgres (default)   │  kafka                │
+                    │  pg_notify with the   │  durable log,         │
+                    │  job id, on channel   │  consumer group,      │
+                    │  conduit_jobs         │  topic "jobs"         │
+                    └──────────┬────────────┴───────────┬───────────┘
+                               ▼                        ▼
+                    ┌──────────────────────┐ ┌──────────────────────┐
+                    │  PostgresListener    │ │  kafkaJobHandler     │
+                    │  (queue/postgres.go) │ │  (cmd/server/main)   │
+                    │  Reconciler.Wake()   │ │  Unmarshal → Submit  │
+                    │  → ClaimNextJob      │ │                      │
+                    └──────────┬───────────┘ └──────────┬───────────┘
+                               └────────────────┬───────┘
                                                 ▼
                         ┌───────────────────────────────────────┐
                         │             Worker Pool                │
@@ -69,7 +73,7 @@ See [WORKERS.md](WORKERS.md) for the pull protocol and [DEPLOYMENT.md](DEPLOYMEN
                         │          (cmd/server/main)             │
                         │                                        │
                         │  1. CircuitBreaker.Allow()?            │
-                        │  2. Redlock.Acquire("job:exec:<id>")   │
+                        │  2. Locker.Acquire("job:exec:<id>")    │
                         │  3. execute(ctx, job)  ← handler hook  │
                         │  4. RecordSuccess / RecordFailure      │
                         │  5. JobService.Complete / Fail         │
@@ -134,10 +138,15 @@ now does the whole move in one statement, with a `CASE` choosing `PENDING` or
 ## Packages
 
 ### `cmd/server`
-Main wiring. Stands up the HTTP server, Kafka consumer, and worker pool, then
-blocks on SIGTERM/SIGINT. Implements `jobWorker` (the `worker.JobRunner` that
-runs the circuit breaker / Redlock / execute chain) and `kafkaJobHandler` (the
-consumer bridge that feeds the pool). Drains in-flight work before exit.
+Main wiring. `main` dispatches a subcommand: `serve` (the default) or `migrate`,
+which applies the schema and exits. `serve` stands up the HTTP server, the
+transport's consume side, and the worker pool, then blocks on SIGTERM/SIGINT.
+It picks the `Publisher` and `Locker` from `CONDUIT_TRANSPORT` and `CONDUIT_LOCK`,
+constructing a Kafka or Redis client only when one is selected - which is what
+makes those services optional rather than mandatory at boot. Implements
+`jobWorker` (the `worker.JobRunner` that runs the circuit breaker / lock /
+execute chain) and `kafkaJobHandler` (the consumer bridge that feeds the pool).
+Drains in-flight work before exit.
 
 Both entry points into the in-process pool respect `CONDUIT_WORKER_QUEUES`: the reconciler
 passes it to `ClaimNextJob`, and `kafkaJobHandler` filters on `task.queue` before
@@ -183,15 +192,17 @@ without a credential. That is why a reverse proxy has to gate them; see
 |--------|------|-------|
 | `GET` | `/metrics` | Prometheus scrape endpoint. |
 | `GET` | `/live` | Liveness - process is up, no dependency checks. |
-| `GET` | `/ready` | Readiness - probes Postgres and the Redis nodes. |
+| `GET` | `/ready` | Readiness - probes Postgres, plus the Redis nodes when `CONDUIT_LOCK=redlock`. |
 | `GET` | `/health` | Combined health summary. |
 
 Metrics middleware counts requests by method / path / status.
 
 ### `internal/service`
-`JobService` is the glue between the HTTP layer and the store + Kafka. It writes
-to Postgres first (that's the commit), then publishes to Kafka in a goroutine.
-Kafka being down doesn't fail the caller.
+`JobService` is the glue between the HTTP layer and the store + transport. It writes
+to Postgres first (that's the commit), then publishes a wake-up in a goroutine
+through the `Publisher` interface, which is the seam that makes the transport
+swappable without this package knowing which one it holds. The transport being
+down doesn't fail the caller.
 The job sits PENDING until the reconciler claims it or a reconnected consumer picks it up.
 
 It also owns the outcome of every job, whoever ran it: `Claim`, `Heartbeat`,
@@ -230,10 +241,26 @@ immediately rather than piling goroutines into a broken downstream. One probe
 is allowed per `OpenTimeout` to test recovery.
 
 ### `internal/lock`
-Redlock over 3 independent Redis nodes. Lock key is `job:exec:<id>`. Quorum
-is 2/3; if we can't get it, another instance already has the job. Release is
-a Lua script - checks the token atomically before deleting so a slow worker
-can't steal an expired lock it no longer owns.
+Three strategies behind one `Locker` interface, selected by `CONDUIT_LOCK`. The
+key is always `job:exec:<id>`, and none of them is what makes execution safe -
+that is `lease_token`, see `internal/store`.
+
+`advisory` (default, `postgres.go`) takes `pg_try_advisory_lock` on an fnv64a
+hash of the key. Every lock lives on one dedicated connection, because a session
+lock has to be released on the session that took it and one connection per
+in-flight job would starve the pool. A single session can take the same key
+twice, so an in-process `held` set is what excludes the process from itself.
+Lock round trips use `context.WithoutCancel`: pgx closes a connection whose
+query is cancelled mid-flight, and closing this one would drop every other lock
+on it.
+
+`redlock` (`redlock.go`) is the Redlock quorum protocol over 3 independent Redis
+nodes. Quorum is 2/3; if we can't get it, another instance already has the job.
+Release is a Lua script - checks the token atomically before deleting so a slow
+worker can't steal an expired lock it no longer owns.
+
+`none` grants everything, which is correct with the Postgres transport because
+every dispatch already goes through one atomic `FOR UPDATE SKIP LOCKED` claim.
 
 ### `internal/retry`
 Exponential backoff with proportional jitter. The cap is applied twice - once
@@ -305,9 +332,9 @@ keeping it in-tree means we control the `Next()` behavior for tests.
 | | Technology |
 |--|------------|
 | HTTP | [Gin](https://github.com/gin-gonic/gin) |
-| Broker | [Kafka](https://kafka.apache.org/) via [Sarama](https://github.com/IBM/sarama) |
+| Transport | Postgres `LISTEN`/`NOTIFY` by default; [Kafka](https://kafka.apache.org/) via [Sarama](https://github.com/IBM/sarama) when selected |
 | Database | [PostgreSQL 16](https://www.postgresql.org/) via [pgx v5](https://github.com/jackc/pgx) |
-| Cache / lock | [Redis 7](https://redis.io/) × 3 via [go-redis v9](https://github.com/redis/go-redis) |
+| Execution lock | `pg_try_advisory_lock` by default; [Redis 7](https://redis.io/) × 3 via [go-redis v9](https://github.com/redis/go-redis) when selected |
 | Metrics | [Prometheus](https://prometheus.io/) + [Grafana](https://grafana.com/) |
 | Logging | [zerolog](https://github.com/rs/zerolog) |
 | Infra | Docker Compose (local), Kubernetes (`deploy/k8s/`) |
@@ -318,18 +345,22 @@ keeping it in-tree means we control the `Next()` behavior for tests.
 ## Running Locally
 
 ```bash
-# Spin up everything (Kafka, 3× Redis, Postgres, Prometheus, Grafana, app):
+# Postgres, one migration run, and the app. That is the whole stack:
 docker compose up --build
 
-# First run: apply the schema
-docker exec -i conduit-postgres-1 psql -U conduit -d conduit < migrations/001_create_jobs.sql
+# Everything else is behind a profile:
+docker compose --profile kafka --profile redis --profile observability up --build
 ```
+
+The schema is applied by the `migrate` service, which compose runs to completion
+before starting the app. Run it by hand after adding a migration with
+`make migrate`, or `conduit migrate` outside Docker.
 
 Infrastructure only (run the server outside Docker):
 
 ```bash
-docker compose up -d kafka redis redis-2 redis-3 postgres
-docker exec -i conduit-postgres-1 psql -U conduit -d conduit < migrations/001_create_jobs.sql
+docker compose up -d postgres
+go run ./cmd/server migrate
 go run ./cmd/server
 ```
 
@@ -371,10 +402,10 @@ Conduit/
 │   ├── api/                # HTTP handlers, pull protocol, API-key auth
 │   ├── circuitbreaker/     # CB state machine
 │   ├── config/             # env-var loading
-│   ├── lock/               # Redlock
+│   ├── lock/               # advisory (default), Redlock, no-op
 │   ├── logger/             # zerolog setup
 │   ├── metrics/            # Prometheus collectors
-│   ├── queue/              # Kafka client
+│   ├── queue/              # pg_notify listener (default), Kafka client
 │   ├── reconciler/         # Postgres-backed due-job and lease recovery
 │   ├── retry/              # backoff engine
 │   ├── scheduler/          # cron scheduler

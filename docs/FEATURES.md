@@ -7,6 +7,11 @@ Study this alongside the code - every section maps to real files you can open.
 
 ## Feature 1 - Async Kafka Publish + Tuning (400+ req/s, sub-1ms p50)
 
+> Since `CONDUIT_TRANSPORT` landed, Kafka is one of two transports and no longer the default.
+> Everything below still describes the Kafka path exactly, and the async-publish insight is what generalises: the transport is a wake-up, Postgres is the commit.
+> The default `postgres` transport publishes one `pg_notify` from the same goroutine, and measures faster on every percentile.
+> See [ADR 0002](decisions/0002-kafka-as-transport-not-as-the-queue.md).
+
 ### The Problem
 
 Before this change, `Enqueue` looked like this (simplified):
@@ -122,6 +127,12 @@ A: Long-lived TCP connections can go stale when a load balancer, firewall, or th
 ---
 
 ## Feature 2 - Redlock Distributed Locking Across 3 Redis Nodes
+
+> Since `CONDUIT_LOCK` landed, Redlock is one of three options and no longer the default.
+> The default `advisory` uses `pg_try_advisory_lock` on one dedicated connection, which needs no TTL and no renewal because the server releases a session lock the moment the connection dies.
+> Measured on the crash scenario, that closes a 7-to-21-second churn window to 0.1 seconds.
+> Everything below still describes the Redlock path exactly, and its "the lock saves duplicated effort, not correctness" conclusion is what made replacing it safe.
+> See [ADR 0003](decisions/0003-redlock-over-postgres-advisory-locks.md).
 
 ### The Problem
 
@@ -307,7 +318,7 @@ spec:
 
 | Decision | Reason |
 |---|---|
-| `replicas: 3` | Matches the 3-node Redis quorum - each pod can independently acquire Redlock |
+| `replicas: 3` | Three pods share the claim load, and under `CONDUIT_LOCK=redlock` the count also matches the 3-node Redis quorum |
 | `terminationGracePeriodSeconds: 35` | Must be longer than the worker's `ShutdownTimeout` (30s) so in-flight jobs finish before the pod is killed |
 | `readinessProbe` before `livenessProbe` | Readiness removes the pod from load balancer rotation; liveness restarts it. Both hit `/health`. |
 | `requests` < `limits` | Allows bursting - pod can use up to 500m CPU temporarily without being throttled by default |
@@ -349,8 +360,8 @@ When average CPU across all pods exceeds 70%, Kubernetes adds pods (up to 10). W
 ```yaml
 data:
   CONDUIT_WORKER_CONCURRENCY: "50"
-  CONDUIT_KAFKA_COMPRESSION_CODEC: "2"
-  CONDUIT_REDIS_ADDRESSES: "redis-0:6379,redis-1:6379,redis-2:6379"
+  CONDUIT_TRANSPORT: "postgres"
+  CONDUIT_LOCK: "advisory"
   ...
 ```
 
@@ -400,10 +411,10 @@ The binary is uploaded as a GitHub Actions artifact so the `load-test` job can d
 
 ```yaml
 - name: Start infrastructure
-  run: |
-    docker compose up -d kafka redis redis-2 redis-3 postgres
-    until docker exec conduit-postgres-1 pg_isready -U conduit; do sleep 2; done
-    docker exec -i conduit-postgres-1 psql -U conduit -d conduit < migrations/001_create_jobs.sql
+  run: docker compose up -d --wait postgres
+
+- name: Apply migrations
+  run: bin/conduit migrate
 
 - name: Start server
   run: |
@@ -415,7 +426,7 @@ The binary is uploaded as a GitHub Actions artifact so the `load-test` job can d
     filename: loadtest/k6.js
 ```
 
-This job spins up the real infrastructure (not mocks), runs the real compiled binary, then hits it with the k6 load test. The k6 script (`loadtest/k6.js`) asserts:
+This job spins up the real infrastructure (not mocks), applies the schema with the same `migrate` subcommand a deployment uses, runs the real compiled binary in its default configuration, then hits it with the k6 load test. The k6 script (`loadtest/k6.js`) asserts:
 - `p(95) < 50ms`
 - Error rate < 1%
 
@@ -444,10 +455,11 @@ A: `ClusterIP` exposes the Service on a cluster-internal IP - only reachable fro
 
 | Feature | Files |
 |---|---|
-| Async Kafka | `internal/service/job_service.go` |
+| Async transport publish | `internal/service/job_service.go` |
 | Kafka tuning | `internal/queue/kafka.go`, `pkg/models/models.go`, `internal/config/config.go` |
 | pgx tuning | `cmd/server/main.go`, `pkg/models/models.go`, `internal/config/config.go` |
-| 3 Redis nodes | `docker-compose.yml`, `internal/config/config.go`, `.env` |
+| 3 Redis nodes (behind the `redis` compose profile) | `docker-compose.yml`, `internal/config/config.go`, `.env` |
 | Redlock logic | `internal/lock/redlock.go` (unchanged - already correct) |
+| Advisory locks, now the default | `internal/lock/postgres.go` |
 | K8s manifests | `deploy/k8s/deployment.yaml`, `service.yaml`, `configmap.yaml`, `hpa.yaml` |
 | CI/CD | `.github/workflows/ci.yml`, `loadtest/k6.js` |

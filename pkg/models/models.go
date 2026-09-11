@@ -138,7 +138,32 @@ type WebhookConfig struct {
 	AllowPrivateNetworks bool
 }
 
+// Transport names the wake-up path for a freshly enqueued job. Neither option
+// carries authority: Postgres is the source of truth and the reconciler is the
+// guaranteed delivery path, so a transport that drops a message costs dispatch
+// latency and nothing else.
+const (
+	TransportPostgres = "postgres"
+	TransportKafka    = "kafka"
+)
+
+// Lock names the strategy that stops two instances executing one job at the
+// same time. It guards duplicated effort, not correctness: the lease token in
+// every state-changing WHERE clause is what makes execution safe.
+const (
+	LockNone     = "none"
+	LockAdvisory = "advisory"
+	LockRedlock  = "redlock"
+)
+
 type Config struct {
+	// Transport is one of TransportPostgres or TransportKafka. Kafka's client is
+	// only constructed when it is selected, which is what makes the broker
+	// optional rather than mandatory at boot.
+	Transport string
+	// Lock is one of LockNone, LockAdvisory, or LockRedlock. Redis clients are
+	// only constructed for LockRedlock.
+	Lock       string
 	HTTP       HTTPConfig
 	Kafka      KafkaConfig
 	Redis      RedisConfig

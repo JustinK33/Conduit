@@ -1,7 +1,21 @@
 # 0002. Kafka is transport, not the queue
 
-Status: accepted.
+Status: accepted, amended 2026-09 for `CONDUIT_TRANSPORT`.
 Date: 2025-07 (`77b8508`, corrected in `a8cb35f`).
+
+The conclusion of this record is intact and is in fact what made the amendment possible: because Kafka holds no authority, it can be swapped for anything that delivers a wake-up, or for nothing at all.
+`CONDUIT_TRANSPORT` now selects `postgres` (the default, `pg_notify` on a hashed channel) or `kafka`.
+
+Two things this record says are no longer true.
+
+The cost named below as "best-effort at runtime but **mandatory at startup**" is fixed: the Kafka client is only constructed when it is selected, so the boot sequence and the design finally agree.
+
+And the reasoning under Context - that Kafka's contribution is removing the poll-interval tradeoff - turned out not to be specific to Kafka.
+`LISTEN`/`NOTIFY` removes the same tradeoff by waking the reconciler instead of delivering the job, and measures faster on every percentile: p50 6.3 ms against 14.9 ms, p95 8.9 ms against 1,537.5 ms.
+Kafka's p95 is consumer-group rebalancing, which is what it costs to maintain partition assignment and offsets for a payload that gets discarded on arrival.
+So the honest reading is that this record was right that a push beats a poll, and wrong to assume a broker was the way to get one.
+
+Kafka remains supported and remains the better answer for one thing this project does not do: fanning the same event out to consumers other than Conduit.
 
 ## Context
 

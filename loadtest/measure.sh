@@ -5,9 +5,11 @@
 #   make measure                  # everything
 #   loadtest/measure.sh drain     # one section
 #
-# Requires docker compose, k6, jq, python3, and the loadtest compose profile
-# (it brings up a webhook sink). It recreates the `app` container between runs
-# to change its configuration, so it will disrupt anything else on this stack.
+# Requires docker compose, k6, jq, python3, and the kafka, redis, and loadtest
+# compose profiles: most of these runs measure the Kafka-plus-Redlock stack
+# against the Postgres-only default, so both have to be available. `make measure`
+# starts them. It recreates the `app` container between runs to change its
+# configuration, so it will disrupt anything else on this stack.
 #
 # Host ports 5433 (Postgres) and 3000 (Grafana) are often taken by other
 # projects; override with POSTGRES_HOST_PORT / GRAFANA_HOST_PORT.
@@ -165,9 +167,9 @@ run_dispatch_latency() {
 # bounded below by CONDUIT_RECONCILER_RUNNING_LEASE, which is the whole point.
 # ---------------------------------------------------------------------------
 run_crash() {
-  local lease="${1:-15s}" jobs="${2:-20}"
-  echo "### crash (lease=$lease, jobs=$jobs)" >&2
-  WORKERS="$jobs" base_app CONDUIT_RECONCILER_RUNNING_LEASE="$lease"
+  local lease="${1:-15s}" jobs="${2:-20}" starter="${3:-base_app}" label="${4:-redlock}"
+  echo "### crash $label (lease=$lease, jobs=$jobs)" >&2
+  WORKERS="$jobs" "$starter" CONDUIT_RECONCILER_RUNNING_LEASE="$lease"
   reset_jobs
 
   # /delay/8 holds each job in RUNNING long enough to be killed mid-execution.
@@ -194,8 +196,8 @@ run_crash() {
     sleep 0.25
   done
 
-  printf 'crash|lease=%s|running_at_kill=%s|requeue_s=%s|all_terminal_s=%s|%s\n' \
-    "$lease" "$running_at_kill" "${t_requeue:-timeout}" "${t_terminal:-timeout}" "$(states)" \
+  printf 'crash-%s|lease=%s|running_at_kill=%s|requeue_s=%s|all_terminal_s=%s|%s\n' \
+    "$label" "$lease" "$running_at_kill" "${t_requeue:-timeout}" "${t_terminal:-timeout}" "$(states)" \
     | tee -a "$OUT_DIR/results.txt"
 }
 
@@ -208,6 +210,11 @@ run_crash() {
 # learns about topics at join time and on Metadata.RefreshFrequency (10 minutes
 # by default), so a group that joins on an auto-created-later topic is assigned
 # no partitions and consumes nothing for the whole run.
+#
+# It pins CONDUIT_TRANSPORT=kafka and CONDUIT_LOCK=redlock explicitly. Those are
+# no longer the defaults, and every number this script has published so far was
+# measured on that stack, so the comparison only means something if it stays
+# fixed here. postgres_app below is the default configuration.
 base_app() {
   local run_id topic
   run_id="m$(date +%s)"
@@ -216,10 +223,24 @@ base_app() {
     --bootstrap-server localhost:9092 --create --if-not-exists \
     --topic "$topic" --partitions 3 >/dev/null 2>&1
   recreate_app \
+    CONDUIT_TRANSPORT=kafka \
+    CONDUIT_LOCK=redlock \
     CONDUIT_WEBHOOK_ALLOW_PRIVATE_NETWORKS=true \
     CONDUIT_WORKER_CONCURRENCY="$WORKERS" \
     CONDUIT_KAFKA_TOPIC="$topic" \
     CONDUIT_KAFKA_CONSUMER_GROUP="conduit-workers-$run_id" \
+    "$@"
+}
+
+# postgres_app starts app in the default configuration: LISTEN/NOTIFY for
+# wake-ups, advisory locks for the execution guard, no broker and no Redis. No
+# per-run topic to create, because there is no topic.
+postgres_app() {
+  recreate_app \
+    CONDUIT_TRANSPORT=postgres \
+    CONDUIT_LOCK=advisory \
+    CONDUIT_WEBHOOK_ALLOW_PRIVATE_NETWORKS=true \
+    CONDUIT_WORKER_CONCURRENCY="$WORKERS" \
     "$@"
 }
 
@@ -235,6 +256,12 @@ case "${1:-all}" in
     WORKERS=32 run_drain "tuned"
     ;;
   dispatch) base_app; run_dispatch_latency "kafka-up" "${2:-20}" ;;
+  # The default configuration: no broker at all, wake-ups over LISTEN/NOTIFY.
+  # This is the row that says whether dropping Kafka costs dispatch latency.
+  dispatch-postgres)
+    postgres_app
+    run_dispatch_latency "postgres" "${2:-20}"
+    ;;
   dispatch-nokafka)
     base_app
     echo "### killing kafka: the reconciler becomes the only dispatch path" >&2
@@ -242,7 +269,13 @@ case "${1:-all}" in
     run_dispatch_latency "kafka-down" "${2:-20}"
     docker compose up -d --wait kafka >/dev/null
     ;;
-  crash)    run_crash "${2:-15s}" "${3:-20}" ;;
+  crash)    run_crash "${2:-15s}" "${3:-20}" base_app redlock ;;
+  # Same crash on the default stack. A Redlock key outlives the process that
+  # took it by its full TTL; an advisory lock dies with its session. This is the
+  # run that says whether that difference shows up in recovery time.
+  crash-postgres)
+    run_crash "${2:-15s}" "${3:-20}" postgres_app advisory
+    ;;
   all)
     : >"$OUT_DIR/results.txt"
     "$0" intake
@@ -250,9 +283,11 @@ case "${1:-all}" in
     "$0" drain-tuned
     "$0" drain-b
     "$0" dispatch
+    "$0" dispatch-postgres
     "$0" dispatch-nokafka
     "$0" crash
+    "$0" crash-postgres
     echo; echo "== $OUT_DIR/results.txt =="; cat "$OUT_DIR/results.txt"
     ;;
-  *) echo "usage: $0 [all|intake|drain|drain-tuned|drain-b|dispatch|dispatch-nokafka|crash]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|intake|drain|drain-tuned|drain-b|dispatch|dispatch-postgres|dispatch-nokafka|crash|crash-postgres]" >&2; exit 2 ;;
 esac

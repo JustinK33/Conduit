@@ -5,6 +5,12 @@ metadata:
   labels:
     app: conduit
 data:
+  # Postgres-only: LISTEN/NOTIFY for wake-ups, pg_try_advisory_lock for the
+  # execution guard. The Kafka and Redis settings below are inert at these
+  # values and are kept so switching is a one-line change.
+  CONDUIT_TRANSPORT: "postgres"
+  CONDUIT_LOCK: "advisory"
+  # Read only when CONDUIT_TRANSPORT: "kafka".
   CONDUIT_KAFKA_BROKERS: "kafka:9092"
   CONDUIT_KAFKA_TOPIC: "conduit.jobs"
   CONDUIT_KAFKA_CONSUMER_GROUP: "conduit-workers"
@@ -12,6 +18,7 @@ data:
   CONDUIT_KAFKA_FLUSH_FREQUENCY_MS: "5"
   CONDUIT_KAFKA_FLUSH_BYTES: "1048576"
   CONDUIT_KAFKA_CHANNEL_BUFFER_SIZE: "256"
+  # Read only when CONDUIT_LOCK: "redlock".
   CONDUIT_REDIS_ADDRESSES: "redis-0:6379,redis-1:6379,redis-2:6379"
   CONDUIT_REDIS_POOL_SIZE: "10"
   CONDUIT_POSTGRES_MAX_CONNS: "10"
