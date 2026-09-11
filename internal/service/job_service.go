@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/example/conduit/internal/retry"
 	"github.com/example/conduit/internal/store"
 	"github.com/example/conduit/pkg/models"
 	"github.com/rs/zerolog"
@@ -21,12 +22,17 @@ type Publisher interface {
 type JobService struct {
 	kafka Publisher
 	store store.JobStore
+	retry *retry.Engine
 	topic string
+	lease time.Duration
 	log   zerolog.Logger
 }
 
-func NewJobService(kafka Publisher, s store.JobStore, topic string, log zerolog.Logger) *JobService {
-	return &JobService{kafka: kafka, store: s, topic: topic, log: log}
+func NewJobService(kafka Publisher, s store.JobStore, r *retry.Engine, topic string, lease time.Duration, log zerolog.Logger) *JobService {
+	if lease <= 0 {
+		lease = 5 * time.Minute
+	}
+	return &JobService{kafka: kafka, store: s, retry: r, topic: topic, lease: lease, log: log}
 }
 
 func (s *JobService) Enqueue(ctx context.Context, job models.Job) (string, error) {
@@ -85,6 +91,109 @@ func (s *JobService) Cancel(ctx context.Context, id string) error {
 		return fmt.Errorf("service: cancel job %s: %w", id, err)
 	}
 	return nil
+}
+
+// Claim hands the next due job in one of the named queues to a caller and
+// returns it with its lease token. An empty queues slice claims from any queue.
+// lease is the caller's request, clamped to the server's configured maximum so
+// a worker cannot park a job for a week.
+func (s *JobService) Claim(ctx context.Context, queues []string, lease time.Duration) (models.Job, error) {
+	job, err := s.store.ClaimNextJob(ctx, s.clampLease(lease), queues)
+	if err != nil {
+		if errors.Is(err, store.ErrJobNotFound) {
+			return models.Job{}, err
+		}
+		return models.Job{}, fmt.Errorf("service: claim job: %w", err)
+	}
+	return job, nil
+}
+
+// Heartbeat extends the lease on a job the caller still holds. It never reads
+// the job: RenewLease is already fenced on state and token, so a stale token
+// matches zero rows.
+func (s *JobService) Heartbeat(ctx context.Context, id, leaseToken string, lease time.Duration) (time.Time, error) {
+	d := s.clampLease(lease)
+	if err := s.store.RenewLease(ctx, models.Job{ID: id, LeaseToken: leaseToken}, d); err != nil {
+		if errors.Is(err, store.ErrInvalidTransition) {
+			return time.Time{}, store.ErrLeaseLost
+		}
+		return time.Time{}, fmt.Errorf("service: renew lease for job %s: %w", id, err)
+	}
+	return time.Now().UTC().Add(d), nil
+}
+
+// Complete marks a job COMPLETED, merging meta into the job's metadata.
+func (s *JobService) Complete(ctx context.Context, id, leaseToken string, meta map[string]string) error {
+	if err := s.store.CompleteClaimedJob(ctx, id, leaseToken, meta); err != nil {
+		if errors.Is(err, store.ErrLeaseLost) {
+			return err
+		}
+		return fmt.Errorf("service: complete job %s: %w", id, err)
+	}
+	return nil
+}
+
+// Fail applies the retry policy to a failed job and writes the outcome in a
+// single statement: PENDING with a future scheduled_at if it should be retried,
+// DEAD otherwise. It takes an id and a token rather than a models.Job so that
+// the in-process worker and the HTTP endpoint cannot drift apart, at the cost of
+// one extra SELECT on the failure path.
+//
+// permanent is the caller saying "do not retry this whatever the policy says",
+// which is what retry.ErrNoRetry means in-process.
+func (s *JobService) Fail(ctx context.Context, id, leaseToken, errMsg string, permanent bool) (models.Job, error) {
+	job, err := s.store.GetJob(ctx, id)
+	if err != nil {
+		return models.Job{}, fmt.Errorf("service: load job %s: %w", id, err)
+	}
+
+	var nextRun *time.Time
+	var delay time.Duration
+	if !permanent && s.shouldRetry(job) {
+		delay = s.retry.Delay(job.Attempt)
+		t := time.Now().UTC().Add(delay)
+		nextRun = &t
+	}
+
+	if err := s.store.FailClaimedJob(ctx, id, leaseToken, errMsg, nextRun); err != nil {
+		if errors.Is(err, store.ErrLeaseLost) {
+			return models.Job{}, err
+		}
+		return models.Job{}, fmt.Errorf("service: fail job %s: %w", id, err)
+	}
+
+	// Reflect the write back to the caller without a second read. The job goes
+	// to PENDING for a retry rather than through FAILED, because the two-write
+	// version could crash in between and leave a row nothing recovered.
+	job.LastError = errMsg
+	job.StartedAt = nil
+	job.LeaseExpiresAt = nil
+	job.LeaseToken = ""
+	if nextRun != nil {
+		job.State = models.JobStatePending
+		job.ScheduledAt = nextRun
+		s.log.Warn().Str("job_id", id).Int("attempt", job.Attempt).Dur("retry_in", delay).Msg("scheduled retry")
+	} else {
+		job.State = models.JobStateDead
+		s.log.Error().Str("job_id", id).Int("attempts", job.Attempt).Str("last_error", errMsg).Msg("job dead-lettered")
+	}
+	return job, nil
+}
+
+// shouldRetry prefers the job's own MaxRetries over the engine's global budget,
+// which is what jobWorker did before this moved.
+func (s *JobService) shouldRetry(job models.Job) bool {
+	if job.Task.MaxRetries > 0 {
+		return job.Attempt < job.Task.MaxRetries
+	}
+	return s.retry.ShouldRetry(job.Attempt, nil)
+}
+
+func (s *JobService) clampLease(requested time.Duration) time.Duration {
+	if requested <= 0 || requested > s.lease {
+		return s.lease
+	}
+	return requested
 }
 
 func newJobID() (string, error) {

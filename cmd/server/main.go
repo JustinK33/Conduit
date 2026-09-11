@@ -121,8 +121,6 @@ func run(ctx context.Context) error {
 	}
 	defer kafkaClient.Close()
 
-	jobSvc := service.NewJobService(kafkaClient, jobStore, cfg.Kafka.Topic, logger.WithComponent(log, "service"))
-
 	breaker := circuitbreaker.New(circuitbreaker.Config{
 		FailureThreshold: 5,
 		SuccessThreshold: 2,
@@ -138,11 +136,14 @@ func run(ctx context.Context) error {
 		Jitter:      0.1,
 	})
 
+	jobSvc := service.NewJobService(kafkaClient, jobStore, retryEngine, cfg.Kafka.Topic,
+		cfg.Reconciler.RunningLease, logger.WithComponent(log, "service"))
+
 	runner := &jobWorker{
 		store:    jobStore,
+		outcome:  jobSvc,
 		lockMgr:  lockMgr,
 		breaker:  breaker,
-		retry:    retryEngine,
 		metrics:  reg,
 		log:      logger.WithComponent(log, "worker"),
 		handlers: defaultHandlers(cfg.Webhook, pgPool),
@@ -256,13 +257,28 @@ func defaultHandlers(cfg models.WebhookConfig, pgPool *pgxpool.Pool) map[string]
 	}
 }
 
+// jobOutcome is the terminal write path, shared with the HTTP worker endpoints
+// so that a job executed in this process and a job executed by a remote worker
+// produce identical state transitions. The retry decision lives behind Fail.
+type jobOutcome interface {
+	Complete(ctx context.Context, id, leaseToken string, meta map[string]string) error
+	Fail(ctx context.Context, id, leaseToken, errMsg string, permanent bool) (models.Job, error)
+}
+
+// jobLocker is lock.Manager narrowed to what execution needs, so the worker's
+// own logic is testable without a live Redis quorum.
+type jobLocker interface {
+	Acquire(ctx context.Context, resource string) (lock.Lock, error)
+	Release(ctx context.Context, l lock.Lock) error
+}
+
 // jobWorker implements worker.JobRunner. It wraps execution with a distributed lock,
 // circuit breaker, retry policy, and per-job timeout.
 type jobWorker struct {
 	store    store.JobStore
-	lockMgr  *lock.Manager
+	outcome  jobOutcome
+	lockMgr  jobLocker
 	breaker  *circuitbreaker.Breaker
-	retry    *retry.Engine
 	metrics  *metrics.Registry
 	log      zerolog.Logger
 	handlers map[string]TaskHandler
@@ -337,24 +353,25 @@ func (jw *jobWorker) Run(ctx context.Context, job models.Job) error {
 	stopRenewLease := jw.startLeaseRenewal(ctx, job)
 	defer stopRenewLease()
 
-	if err := jw.execute(ctx, job); err != nil {
+	if runErr := jw.execute(ctx, job); runErr != nil {
 		jw.breaker.RecordFailure()
 		jw.metrics.JobFailed.Inc()
 
-		if jw.shouldRetry(job, err) {
-			return jw.scheduleRetry(ctx, job, err)
+		// The retry policy lives in the service layer so that this path and the
+		// HTTP fail endpoint cannot drift. ErrNoRetry is how an in-process
+		// handler says "permanent" - the same thing a remote worker says by
+		// posting retry:false.
+		permanent := errors.Is(runErr, retry.ErrNoRetry)
+		if _, err := jw.outcome.Fail(ctx, job.ID, job.LeaseToken, runErr.Error(), permanent); err != nil {
+			jw.log.Error().Err(err).Str("job_id", job.ID).Msg("failed to record job failure")
 		}
-		return jw.deadLetter(ctx, job, err)
+		return runErr
 	}
 
 	jw.breaker.RecordSuccess()
 	jw.metrics.JobCompleted.Inc()
 
-	completedAt := time.Now().UTC()
-	job.State = models.JobStateCompleted
-	job.CompletedAt = &completedAt
-	job.LeaseExpiresAt = nil
-	if err := jw.store.UpdateJob(ctx, job); err != nil {
+	if err := jw.outcome.Complete(ctx, job.ID, job.LeaseToken, nil); err != nil {
 		jw.log.Error().Err(err).Str("job_id", job.ID).Msg("failed to mark job complete")
 		return err
 	}
@@ -429,60 +446,6 @@ func (jw *jobWorker) execute(ctx context.Context, job models.Job) error {
 		defer cancel()
 	}
 	return handler(ctx, job)
-}
-
-func (jw *jobWorker) shouldRetry(job models.Job, err error) bool {
-	if job.Task.MaxRetries > 0 {
-		return !errors.Is(err, retry.ErrNoRetry) && job.Attempt < job.Task.MaxRetries
-	}
-	return jw.retry.ShouldRetry(job.Attempt, err)
-}
-
-// scheduleRetry transitions RUNNING to FAILED to PENDING and stamps scheduled_at
-// with the next attempt's backoff. The reconciler dispatches the job when it
-// becomes due.
-func (jw *jobWorker) scheduleRetry(ctx context.Context, job models.Job, runErr error) error {
-	delay := jw.retry.Delay(job.Attempt)
-	nextRun := time.Now().UTC().Add(delay)
-
-	// RUNNING to FAILED.
-	job.State = models.JobStateFailed
-	job.LastError = runErr.Error()
-	if err := jw.store.UpdateJob(ctx, job); err != nil {
-		jw.log.Error().Err(err).Str("job_id", job.ID).Msg("failed to record retry state")
-		return runErr
-	}
-
-	// FAILED to PENDING with future scheduled_at.
-	job.State = models.JobStatePending
-	job.ScheduledAt = &nextRun
-	job.StartedAt = nil
-	job.LeaseExpiresAt = nil
-	if err := jw.store.UpdateJob(ctx, job); err != nil {
-		jw.log.Error().Err(err).Str("job_id", job.ID).Msg("failed to reschedule retry")
-		return runErr
-	}
-
-	jw.log.Warn().
-		Err(runErr).
-		Str("job_id", job.ID).
-		Int("attempt", job.Attempt).
-		Dur("retry_in", delay).
-		Msg("scheduled retry")
-	return runErr
-}
-
-// deadLetter transitions RUNNING → DEAD when retries are exhausted or the
-// error is permanent (errors.Is(err, retry.ErrNoRetry)).
-func (jw *jobWorker) deadLetter(ctx context.Context, job models.Job, runErr error) error {
-	job.State = models.JobStateDead
-	job.LastError = runErr.Error()
-	job.LeaseExpiresAt = nil
-	if err := jw.store.UpdateJob(ctx, job); err != nil {
-		jw.log.Error().Err(err).Str("job_id", job.ID).Msg("failed to dead-letter job")
-	}
-	jw.log.Error().Err(runErr).Str("job_id", job.ID).Int("attempts", job.Attempt).Msg("job exhausted retries")
-	return runErr
 }
 
 // readinessHandler verifies the service can actually serve traffic by pinging
