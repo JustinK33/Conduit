@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/example/conduit/pkg/models"
+	"github.com/JustinK33/Conduit/pkg/models"
 )
 
 type JobRunner interface {

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/conduit/pkg/models"
+	"github.com/JustinK33/Conduit/pkg/models"
 )
 
 func TestNew(t *testing.T) {

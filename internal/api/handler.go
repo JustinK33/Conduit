@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/example/conduit/internal/metrics"
-	"github.com/example/conduit/internal/store"
-	"github.com/example/conduit/pkg/models"
+	"github.com/JustinK33/Conduit/internal/metrics"
+	"github.com/JustinK33/Conduit/internal/store"
+	"github.com/JustinK33/Conduit/pkg/models"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 )

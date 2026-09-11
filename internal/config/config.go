@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/example/conduit/pkg/models"
+	"github.com/JustinK33/Conduit/pkg/models"
 )
 
 // Environment abstracts environment lookups so config loading can be tested

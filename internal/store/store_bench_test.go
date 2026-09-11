@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"github.com/example/conduit/pkg/models"
+	"github.com/JustinK33/Conduit/pkg/models"
 )
 
 // BenchmarkCanTransition measures the state machine transition check.

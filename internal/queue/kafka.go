@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
-	"github.com/example/conduit/pkg/models"
+	"github.com/JustinK33/Conduit/pkg/models"
 )
 
 type MessageHandler interface {

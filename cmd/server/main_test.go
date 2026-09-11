@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/conduit/internal/circuitbreaker"
-	"github.com/example/conduit/internal/lock"
-	"github.com/example/conduit/internal/metrics"
-	"github.com/example/conduit/internal/retry"
-	"github.com/example/conduit/internal/store"
-	"github.com/example/conduit/pkg/models"
+	"github.com/JustinK33/Conduit/internal/circuitbreaker"
+	"github.com/JustinK33/Conduit/internal/lock"
+	"github.com/JustinK33/Conduit/internal/metrics"
+	"github.com/JustinK33/Conduit/internal/retry"
+	"github.com/JustinK33/Conduit/internal/store"
+	"github.com/JustinK33/Conduit/pkg/models"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 )

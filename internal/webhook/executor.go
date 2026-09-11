@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/example/conduit/internal/retry"
-	"github.com/example/conduit/pkg/models"
+	"github.com/JustinK33/Conduit/internal/retry"
+	"github.com/JustinK33/Conduit/pkg/models"
 )
 
 const (

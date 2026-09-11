@@ -1,4 +1,4 @@
-module github.com/example/conduit
+module github.com/JustinK33/Conduit
 
 go 1.23
 
