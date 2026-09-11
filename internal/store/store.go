@@ -402,7 +402,14 @@ func (s *PostgresStore) CompleteClaimedJob(ctx context.Context, id, leaseToken s
 			lease_expires_at = NULL,
 			lease_token = NULL,
 			updated_at = NOW(),
-			metadata = metadata || $1::jsonb
+			-- A job enqueued without metadata stores JSON null, not SQL NULL,
+			-- because CreateJob marshals a nil map. jsonb's || then treats the
+			-- two sides as arrays and produces [null, {...}], which scanJob
+			-- cannot read into a map: the worker's result would be silently
+			-- lost behind one warn line. Anything that is not an object starts
+			-- from {} instead.
+			metadata = CASE WHEN jsonb_typeof(metadata) = 'object'
+				THEN metadata ELSE '{}'::jsonb END || $1::jsonb
 		WHERE id = $2
 		  AND state = 'RUNNING'
 		  AND lease_token = $3`, s.TableName)
