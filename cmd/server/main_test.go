@@ -214,3 +214,30 @@ func TestJobWorkerUnregisteredTaskIsPermanent(t *testing.T) {
 		t.Error("an unregistered task name must not burn retry attempts")
 	}
 }
+
+// The topic carries every job regardless of queue, so this filter is the only
+// thing stopping the in-process pool from eating a remote worker's jobs and
+// dead-lettering them for having no handler.
+func TestKafkaJobHandlerClaimsOnlyItsQueues(t *testing.T) {
+	tests := []struct {
+		name   string
+		queues []string
+		queue  string
+		want   bool
+	}{
+		{name: "no filter takes everything", queues: nil, queue: "remote", want: true},
+		{name: "a named queue is taken", queues: []string{"default", "webhook"}, queue: "webhook", want: true},
+		{name: "another worker's queue is left alone", queues: []string{"default"}, queue: "remote", want: false},
+		{name: "an unset queue counts as the default", queues: []string{"default"}, queue: "", want: true},
+		{name: "an unset queue is skipped when default is not ours", queues: []string{"remote"}, queue: "", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &kafkaJobHandler{queues: tc.queues}
+			if got := h.claims(tc.queue); got != tc.want {
+				t.Errorf("claims(%q) with %v = %v, want %v", tc.queue, tc.queues, got, tc.want)
+			}
+		})
+	}
+}

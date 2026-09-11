@@ -173,7 +173,7 @@ func run(ctx context.Context) error {
 
 	consumerLog := logger.WithComponent(log, "consumer")
 	go func() {
-		h := &kafkaJobHandler{pool: workerPool, log: consumerLog}
+		h := &kafkaJobHandler{pool: workerPool, queues: cfg.Worker.Queues, log: consumerLog}
 		if err := kafkaClient.Consume(ctx, []string{cfg.Kafka.Topic}, h); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error().Err(err).Msg("kafka consumer stopped")
 		}
@@ -543,13 +543,24 @@ func readinessHandler(pg *pgxpool.Pool, redisClients []redis.UniversalClient, lo
 // kafkaJobHandler bridges Kafka messages to the worker pool.
 type kafkaJobHandler struct {
 	pool *worker.Pool
-	log  zerolog.Logger
+	// queues is the same filter the reconciler applies. The topic carries every
+	// job regardless of queue, so without this the in-process pool would run
+	// jobs meant for remote workers - and dead-letter them, since it has no
+	// handler for them - before the remote worker ever polled. Empty means all
+	// queues, matching WORKER_QUEUES everywhere else.
+	queues []string
+	log    zerolog.Logger
 }
 
 func (h *kafkaJobHandler) Handle(ctx context.Context, msg *sarama.ConsumerMessage) error {
 	var job models.Job
 	if err := json.Unmarshal(msg.Value, &job); err != nil {
 		h.log.Error().Err(err).Msg("failed to unmarshal kafka message")
+		return nil
+	}
+	if !h.claims(job.Task.Queue) {
+		// Not ours. The job stays PENDING for whoever claims that queue, and
+		// returning nil marks the offset so the topic does not stall on it.
 		return nil
 	}
 	if !h.pool.Submit(ctx, job) {
@@ -561,6 +572,22 @@ func (h *kafkaJobHandler) Handle(ctx context.Context, msg *sarama.ConsumerMessag
 		return fmt.Errorf("worker pool full")
 	}
 	return nil
+}
+
+func (h *kafkaJobHandler) claims(queue string) bool {
+	if len(h.queues) == 0 {
+		return true
+	}
+	if queue == "" {
+		// Pre-normalisation rows and anything enqueued by an older build.
+		queue = models.DefaultQueue
+	}
+	for _, q := range h.queues {
+		if q == queue {
+			return true
+		}
+	}
+	return false
 }
 
 func newWorkerLeaseToken() (string, error) {
