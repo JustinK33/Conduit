@@ -1,7 +1,11 @@
 # 0005. A webhook is the execution model, so Conduit is not a library
 
-Status: accepted.
+Status: accepted, amended by [0006](0006-a-pull-api-instead-of-a-worker-sdk.md).
 Date: 2025-07 (`a8cb35f` for `webhook`, `ad5f143` for `sql.etl`).
+
+Webhook execution is still supported and still the default.
+What changed is that the cost named at the bottom of this record, "a job cannot run in your process," no longer holds: workers can now pull jobs over HTTP and execute them wherever they run.
+The conclusion this record reached is intact, though. There is still no SDK to import.
 
 ## Context
 

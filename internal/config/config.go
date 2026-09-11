@@ -104,6 +104,7 @@ func LoadFromEnvironment(env Environment) (models.Config, error) {
 	p.dur("HTTP_READ_TIMEOUT", &cfg.HTTP.ReadTimeout)
 	p.dur("HTTP_WRITE_TIMEOUT", &cfg.HTTP.WriteTimeout)
 	p.dur("HTTP_IDLE_TIMEOUT", &cfg.HTTP.IdleTimeout)
+	p.strs("API_KEYS", &cfg.HTTP.APIKeys)
 
 	p.strs("KAFKA_BROKERS", &cfg.Kafka.Brokers)
 	p.str("KAFKA_TOPIC", &cfg.Kafka.Topic)
@@ -132,6 +133,7 @@ func LoadFromEnvironment(env Environment) (models.Config, error) {
 	p.intv("WORKER_CONCURRENCY", &cfg.Worker.Concurrency)
 	p.intv("WORKER_QUEUE_SIZE", &cfg.Worker.QueueSize)
 	p.dur("WORKER_SHUTDOWN_TIMEOUT", &cfg.Worker.ShutdownTimeout)
+	p.strs("WORKER_QUEUES", &cfg.Worker.Queues)
 
 	p.boolv("SCHEDULER_ENABLED", &cfg.Scheduler.Enabled)
 	p.dur("SCHEDULER_TICK_INTERVAL", &cfg.Scheduler.TickInterval)
@@ -180,6 +182,11 @@ func Validate(cfg models.Config) error {
 	if cfg.Webhook.MaxRedirects < 0 {
 		return fmt.Errorf("config: WEBHOOK_MAX_REDIRECTS must be >= 0, got %d", cfg.Webhook.MaxRedirects)
 	}
+	for _, key := range cfg.HTTP.APIKeys {
+		if len(key) < 16 {
+			return fmt.Errorf("config: API_KEYS must be at least 16 characters each, got one with length %d", len(key))
+		}
+	}
 	return nil
 }
 
@@ -203,7 +210,15 @@ func (p envParser) str(key string, dest *string) {
 
 func (p envParser) strs(key string, dest *[]string) {
 	if v, ok := p.lookup(key); ok {
-		*dest = strings.Split(v, ",")
+		parts := strings.Split(v, ",")
+		var result []string
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+		*dest = result
 	}
 }
 

@@ -122,6 +122,39 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "empty API_KEYS is valid",
+			cfg: models.Config{
+				HTTP:     models.HTTPConfig{Address: ":8080", ReadTimeout: 5e9, WriteTimeout: 5e9, APIKeys: []string{}},
+				Kafka:    models.KafkaConfig{Brokers: []string{"localhost:9092"}, Topic: "jobs", ConsumerGroup: "workers"},
+				Postgres: models.PostgresConfig{DSN: "postgres://localhost/conduit"},
+				Worker:   models.WorkerConfig{Concurrency: 4, QueueSize: 32},
+				Webhook:  models.WebhookConfig{Timeout: time.Second},
+			},
+			wantErr: false,
+		},
+		{
+			name: "API_KEYS with valid length is valid",
+			cfg: models.Config{
+				HTTP:     models.HTTPConfig{Address: ":8080", ReadTimeout: 5e9, WriteTimeout: 5e9, APIKeys: []string{"abcdefghijklmnop"}},
+				Kafka:    models.KafkaConfig{Brokers: []string{"localhost:9092"}, Topic: "jobs", ConsumerGroup: "workers"},
+				Postgres: models.PostgresConfig{DSN: "postgres://localhost/conduit"},
+				Worker:   models.WorkerConfig{Concurrency: 4, QueueSize: 32},
+				Webhook:  models.WebhookConfig{Timeout: time.Second},
+			},
+			wantErr: false,
+		},
+		{
+			name: "API_KEYS shorter than 16 chars is invalid",
+			cfg: models.Config{
+				HTTP:     models.HTTPConfig{Address: ":8080", ReadTimeout: 5e9, WriteTimeout: 5e9, APIKeys: []string{"short"}},
+				Kafka:    models.KafkaConfig{Brokers: []string{"localhost:9092"}, Topic: "jobs", ConsumerGroup: "workers"},
+				Postgres: models.PostgresConfig{DSN: "postgres://localhost/conduit"},
+				Worker:   models.WorkerConfig{Concurrency: 4, QueueSize: 32},
+				Webhook:  models.WebhookConfig{Timeout: time.Second},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -134,5 +167,75 @@ func TestValidate(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadFromEnvironmentParsesAPIKeys(t *testing.T) {
+	cfg, err := LoadFromEnvironment(mockEnvironment{values: map[string]string{
+		"API_KEYS": "key-one-0123456789,key-two-abcdefghij,key-three-xyz123456",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.HTTP.APIKeys) != 3 {
+		t.Fatalf("API_KEYS length = %d, want 3", len(cfg.HTTP.APIKeys))
+	}
+	if cfg.HTTP.APIKeys[0] != "key-one-0123456789" {
+		t.Errorf("API_KEYS[0] = %q, want %q", cfg.HTTP.APIKeys[0], "key-one-0123456789")
+	}
+	if cfg.HTTP.APIKeys[1] != "key-two-abcdefghij" {
+		t.Errorf("API_KEYS[1] = %q, want %q", cfg.HTTP.APIKeys[1], "key-two-abcdefghij")
+	}
+	if cfg.HTTP.APIKeys[2] != "key-three-xyz123456" {
+		t.Errorf("API_KEYS[2] = %q, want %q", cfg.HTTP.APIKeys[2], "key-three-xyz123456")
+	}
+}
+
+func TestLoadFromEnvironmentTrimsWhitespaceInCommaSeparatedLists(t *testing.T) {
+	cfg, err := LoadFromEnvironment(mockEnvironment{values: map[string]string{
+		"API_KEYS":        "key-one-0123456789, key-two-abcdefghij , key-three-xyz123456",
+		"WORKER_QUEUES":   "queue-a , queue-b,  queue-c  ",
+		"KAFKA_BROKERS":   "localhost:9092 , kafka:9092",
+		"REDIS_ADDRESSES": "redis:6379 , redis-2:6379",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.HTTP.APIKeys) != 3 {
+		t.Fatalf("API_KEYS length = %d, want 3", len(cfg.HTTP.APIKeys))
+	}
+	if cfg.HTTP.APIKeys[0] != "key-one-0123456789" || cfg.HTTP.APIKeys[1] != "key-two-abcdefghij" || cfg.HTTP.APIKeys[2] != "key-three-xyz123456" {
+		t.Errorf("API_KEYS not trimmed: %v", cfg.HTTP.APIKeys)
+	}
+	if len(cfg.Worker.Queues) != 3 {
+		t.Fatalf("WORKER_QUEUES length = %d, want 3", len(cfg.Worker.Queues))
+	}
+	if cfg.Worker.Queues[0] != "queue-a" || cfg.Worker.Queues[1] != "queue-b" || cfg.Worker.Queues[2] != "queue-c" {
+		t.Errorf("WORKER_QUEUES not trimmed: %v", cfg.Worker.Queues)
+	}
+	if len(cfg.Kafka.Brokers) != 2 {
+		t.Fatalf("KAFKA_BROKERS length = %d, want 2", len(cfg.Kafka.Brokers))
+	}
+	if cfg.Kafka.Brokers[0] != "localhost:9092" || cfg.Kafka.Brokers[1] != "kafka:9092" {
+		t.Errorf("KAFKA_BROKERS not trimmed: %v", cfg.Kafka.Brokers)
+	}
+	if len(cfg.Redis.Addresses) != 2 {
+		t.Fatalf("REDIS_ADDRESSES length = %d, want 2", len(cfg.Redis.Addresses))
+	}
+	if cfg.Redis.Addresses[0] != "redis:6379" || cfg.Redis.Addresses[1] != "redis-2:6379" {
+		t.Errorf("REDIS_ADDRESSES not trimmed: %v", cfg.Redis.Addresses)
+	}
+}
+
+func TestLoadFromEnvironmentUnsetMeansEmpty(t *testing.T) {
+	cfg, err := LoadFromEnvironment(mockEnvironment{values: map[string]string{}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.HTTP.APIKeys) != 0 {
+		t.Errorf("unset API_KEYS should be empty, got %v", cfg.HTTP.APIKeys)
+	}
+	if len(cfg.Worker.Queues) != 0 {
+		t.Errorf("unset WORKER_QUEUES should be empty, got %v", cfg.Worker.Queues)
 	}
 }

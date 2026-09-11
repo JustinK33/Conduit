@@ -12,7 +12,7 @@ import (
 )
 
 type JobStore interface {
-	ClaimNextJob(context.Context, time.Duration) (models.Job, error)
+	ClaimNextJob(context.Context, time.Duration, []string) (models.Job, error)
 	RequeueExpiredRunning(context.Context, int) (int, error)
 	ReleaseClaim(context.Context, models.Job, string) error
 }
@@ -26,6 +26,7 @@ type Config struct {
 	IdleInterval time.Duration
 	BatchSize    int
 	RunningLease time.Duration
+	Queues       []string
 }
 
 type Reconciler struct {
@@ -124,7 +125,7 @@ func (r *Reconciler) reconcile(ctx context.Context) bool {
 			return hadWork
 		}
 
-		job, err := r.store.ClaimNextJob(ctx, r.cfg.RunningLease)
+		job, err := r.store.ClaimNextJob(ctx, r.cfg.RunningLease, r.cfg.Queues)
 		if errors.Is(err, store.ErrJobNotFound) {
 			break
 		}

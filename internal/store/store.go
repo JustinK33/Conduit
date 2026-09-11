@@ -26,10 +26,12 @@ type JobStore interface {
 	GetJob(context.Context, string) (models.Job, error)
 	GetJobByIdempotencyKey(context.Context, string) (models.Job, error)
 	CancelJob(context.Context, string) error
-	ClaimNextJob(context.Context, time.Duration) (models.Job, error)
+	ClaimNextJob(context.Context, time.Duration, []string) (models.Job, error)
 	RenewLease(context.Context, models.Job, time.Duration) error
 	RequeueExpiredRunning(context.Context, int) (int, error)
 	ReleaseClaim(context.Context, models.Job, string) error
+	CompleteClaimedJob(context.Context, string, string, map[string]string) error
+	FailClaimedJob(context.Context, string, string, string, *time.Time) error
 	ListJobs(context.Context, ListFilter) ([]models.Job, string, error)
 }
 
@@ -241,12 +243,19 @@ func (s *PostgresStore) CancelJob(ctx context.Context, id string) error {
 
 // ClaimNextJob atomically selects the next due PENDING job and marks it RUNNING,
 // using SELECT FOR UPDATE SKIP LOCKED so concurrent workers don't double-claim.
-func (s *PostgresStore) ClaimNextJob(ctx context.Context, leaseDuration time.Duration) (models.Job, error) {
+func (s *PostgresStore) ClaimNextJob(ctx context.Context, leaseDuration time.Duration, queues []string) (models.Job, error) {
 	now := time.Now().UTC()
 	leaseExpiresAt := now.Add(leaseDuration)
 	leaseToken, err := newLeaseToken()
 	if err != nil {
 		return models.Job{}, fmt.Errorf("store: generate lease token: %w", err)
+	}
+
+	var queueParam any
+	if len(queues) == 0 {
+		queueParam = nil
+	} else {
+		queueParam = queues
 	}
 
 	query := fmt.Sprintf(`
@@ -255,6 +264,7 @@ func (s *PostgresStore) ClaimNextJob(ctx context.Context, leaseDuration time.Dur
 			FROM %s
 			WHERE state = 'PENDING'
 			  AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+			  AND ($5::text[] IS NULL OR task_queue = ANY($5))
 			ORDER BY scheduled_at ASC NULLS LAST
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
@@ -276,7 +286,7 @@ func (s *PostgresStore) ClaimNextJob(ctx context.Context, leaseDuration time.Dur
 			jobs.scheduled_at, jobs.started_at, jobs.lease_expires_at, jobs.lease_token, jobs.completed_at,
 			jobs.created_at, jobs.updated_at, jobs.metadata`, s.TableName, s.TableName)
 
-	job, err := scanJob(ctx, s.Pool.QueryRow(ctx, query, now, leaseExpiresAt, leaseToken, now))
+	job, err := scanJob(ctx, s.Pool.QueryRow(ctx, query, now, leaseExpiresAt, leaseToken, now, queueParam))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return models.Job{}, ErrJobNotFound
@@ -366,6 +376,81 @@ func (s *PostgresStore) ReleaseClaim(ctx context.Context, job models.Job, reason
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrInvalidTransition
+	}
+	return nil
+}
+
+func (s *PostgresStore) CompleteClaimedJob(ctx context.Context, id, leaseToken string, meta map[string]string) error {
+	if leaseToken == "" {
+		return ErrInvalidTransition
+	}
+
+	metaBytes := []byte("{}")
+	if len(meta) > 0 {
+		var err error
+		metaBytes, err = json.Marshal(meta)
+		if err != nil {
+			return fmt.Errorf("store: marshal metadata: %w", err)
+		}
+	}
+
+	query := fmt.Sprintf(`
+		UPDATE %s
+		SET state = 'COMPLETED',
+			completed_at = NOW(),
+			started_at = NULL,
+			lease_expires_at = NULL,
+			lease_token = NULL,
+			updated_at = NOW(),
+			metadata = metadata || $1::jsonb
+		WHERE id = $2
+		  AND state = 'RUNNING'
+		  AND lease_token = $3`, s.TableName)
+
+	tag, err := s.Pool.Exec(ctx, query, metaBytes, id, leaseToken)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (s *PostgresStore) FailClaimedJob(ctx context.Context, id, leaseToken, errMsg string, nextRun *time.Time) error {
+	if leaseToken == "" {
+		return ErrInvalidTransition
+	}
+
+	query := fmt.Sprintf(`
+		UPDATE %s
+		SET state = CASE
+				WHEN $1::timestamptz IS NOT NULL THEN 'PENDING'
+				ELSE 'DEAD'
+			END,
+			last_error = $2,
+			scheduled_at = CASE
+				WHEN $1::timestamptz IS NOT NULL THEN $1
+				ELSE scheduled_at
+			END,
+			completed_at = CASE
+				WHEN $1::timestamptz IS NULL THEN NOW()
+				ELSE completed_at
+			END,
+			started_at = NULL,
+			lease_expires_at = NULL,
+			lease_token = NULL,
+			updated_at = NOW()
+		WHERE id = $3
+		  AND state = 'RUNNING'
+		  AND lease_token = $4`, s.TableName)
+
+	tag, err := s.Pool.Exec(ctx, query, nextRun, errMsg, id, leaseToken)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrLeaseLost
 	}
 	return nil
 }

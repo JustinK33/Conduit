@@ -93,8 +93,10 @@ services:
     # These override .env when set in the host shell, which is how
     # loadtest/measure.sh drives its A/B runs without rewriting .env.
     environment:
+      API_KEYS: ${API_KEYS:-}
       REDIS_ADDRESSES: ${REDIS_ADDRESSES:-redis:6379,redis-2:6379,redis-3:6379}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-8}
+      WORKER_QUEUES: ${WORKER_QUEUES:-}
       RECONCILER_RUNNING_LEASE: ${RECONCILER_RUNNING_LEASE:-5m}
       WEBHOOK_ALLOW_PRIVATE_NETWORKS: ${WEBHOOK_ALLOW_PRIVATE_NETWORKS:-false}
       # measure.sh points these at a fresh topic per run. Reusing one topic

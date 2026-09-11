@@ -69,7 +69,7 @@ func TestJobRoundTripWithoutIdempotencyKey(t *testing.T) {
 	// ClaimNextJob shares scanJob, and this is the call the reconciler makes
 	// every tick. It may claim a different due job if the table is busy, so
 	// only assert that scanning succeeded.
-	claimed, err := s.ClaimNextJob(ctx, time.Minute)
+	claimed, err := s.ClaimNextJob(ctx, time.Minute, nil)
 	if err != nil {
 		t.Fatalf("ClaimNextJob: %v", err)
 	}
@@ -78,5 +78,383 @@ func TestJobRoundTripWithoutIdempotencyKey(t *testing.T) {
 	}
 	if claimed.State != models.JobStateRunning {
 		t.Errorf("claimed state = %s, want RUNNING", claimed.State)
+	}
+}
+
+func TestClaimNextJobQueueFilter(t *testing.T) {
+	dsn := os.Getenv("POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set POSTGRES_TEST_DSN to run")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	s := NewPostgresStore(pool, "jobs")
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name      string
+		jobQueue  string
+		filter    []string
+		wantClaim bool
+	}{
+		{
+			name:      "claim with matching queue filter",
+			jobQueue:  "email",
+			filter:    []string{"email", "sms"},
+			wantClaim: true,
+		},
+		{
+			name:      "skip job with non-matching queue filter",
+			jobQueue:  "email",
+			filter:    []string{"sms"},
+			wantClaim: false,
+		},
+		{
+			name:      "claim with nil filter returns any job",
+			jobQueue:  "email",
+			filter:    nil,
+			wantClaim: true,
+		},
+		{
+			name:      "claim with empty filter returns any job",
+			jobQueue:  "email",
+			filter:    []string{},
+			wantClaim: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "test-queue-" + time.Now().UTC().Format("20060102150405.000000000")
+			job := models.Job{
+				ID:          id,
+				Task:        models.Task{ID: id, Name: "send-email", Queue: tc.jobQueue},
+				State:       models.JobStatePending,
+				ScheduledAt: &now,
+				CreatedAt:   now,
+			}
+			if err := s.CreateJob(ctx, job); err != nil {
+				t.Fatalf("CreateJob: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = pool.Exec(context.Background(), "DELETE FROM jobs WHERE id = $1", id)
+			})
+
+			claimed, err := s.ClaimNextJob(ctx, time.Minute, tc.filter)
+			if tc.wantClaim {
+				if err != nil {
+					t.Fatalf("ClaimNextJob: %v", err)
+				}
+				if claimed.ID != id {
+					t.Errorf("claimed wrong job: got %s, want %s", claimed.ID, id)
+				}
+				if claimed.Task.Queue != tc.jobQueue {
+					t.Errorf("claimed queue = %s, want %s", claimed.Task.Queue, tc.jobQueue)
+				}
+			} else {
+				if err != ErrJobNotFound {
+					t.Fatalf("ClaimNextJob: want ErrJobNotFound, got %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestCompleteClaimedJob(t *testing.T) {
+	dsn := os.Getenv("POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set POSTGRES_TEST_DSN to run")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	s := NewPostgresStore(pool, "jobs")
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name       string
+		setupToken string
+		callToken  string
+		meta       map[string]string
+		wantErr    error
+	}{
+		{
+			name:       "complete with correct token",
+			setupToken: "valid-token",
+			callToken:  "valid-token",
+			meta:       map[string]string{"result": "success"},
+			wantErr:    nil,
+		},
+		{
+			name:       "complete with stale token returns ErrLeaseLost",
+			setupToken: "valid-token",
+			callToken:  "stale-token",
+			meta:       nil,
+			wantErr:    ErrLeaseLost,
+		},
+		{
+			name:       "complete with empty token returns ErrInvalidTransition",
+			setupToken: "valid-token",
+			callToken:  "",
+			meta:       nil,
+			wantErr:    ErrInvalidTransition,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "test-complete-" + time.Now().UTC().Format("20060102150405.000000000")
+			job := models.Job{
+				ID:          id,
+				Task:        models.Task{ID: id, Name: "send-email", Queue: "default"},
+				State:       models.JobStatePending,
+				ScheduledAt: &now,
+				CreatedAt:   now,
+				Metadata:    map[string]string{"existing": "value"},
+			}
+			if err := s.CreateJob(ctx, job); err != nil {
+				t.Fatalf("CreateJob: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = pool.Exec(context.Background(), "DELETE FROM jobs WHERE id = $1", id)
+			})
+
+			// Claim the job with the setup token
+			_, err := pool.Exec(ctx, `
+				UPDATE jobs
+				SET state = 'RUNNING',
+					lease_token = $1,
+					lease_expires_at = NOW() + INTERVAL '1 minute'
+				WHERE id = $2
+			`, tc.setupToken, id)
+			if err != nil {
+				t.Fatalf("setup claim: %v", err)
+			}
+
+			err = s.CompleteClaimedJob(ctx, id, tc.callToken, tc.meta)
+			if err != tc.wantErr {
+				t.Fatalf("CompleteClaimedJob: got error %v, want %v", err, tc.wantErr)
+			}
+
+			if tc.wantErr == nil {
+				got, err := s.GetJob(ctx, id)
+				if err != nil {
+					t.Fatalf("GetJob: %v", err)
+				}
+				if got.State != models.JobStateCompleted {
+					t.Errorf("state = %s, want COMPLETED", got.State)
+				}
+				if got.CompletedAt == nil {
+					t.Error("completed_at is nil, want set")
+				}
+				if got.LeaseToken != "" {
+					t.Errorf("lease_token = %q, want empty", got.LeaseToken)
+				}
+				if got.StartedAt != nil {
+					t.Error("started_at should be NULL after completion")
+				}
+				if got.LeaseExpiresAt != nil {
+					t.Error("lease_expires_at should be NULL after completion")
+				}
+				// Check metadata merge
+				if got.Metadata["existing"] != "value" {
+					t.Errorf("existing metadata lost: %v", got.Metadata)
+				}
+				if tc.meta != nil && got.Metadata["result"] != "success" {
+					t.Errorf("new metadata not merged: %v", got.Metadata)
+				}
+			} else if tc.wantErr == ErrLeaseLost {
+				// Verify row unchanged
+				got, err := s.GetJob(ctx, id)
+				if err != nil {
+					t.Fatalf("GetJob: %v", err)
+				}
+				if got.State != models.JobStateRunning {
+					t.Errorf("state = %s, want RUNNING (unchanged)", got.State)
+				}
+			}
+		})
+	}
+}
+
+func TestFailClaimedJob(t *testing.T) {
+	dsn := os.Getenv("POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set POSTGRES_TEST_DSN to run")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	s := NewPostgresStore(pool, "jobs")
+	now := time.Now().UTC()
+	future := now.Add(time.Hour)
+
+	tests := []struct {
+		name        string
+		setupToken  string
+		callToken   string
+		errMsg      string
+		nextRun     *time.Time
+		wantErr     error
+		wantState   models.JobState
+		checkFields func(*testing.T, models.Job)
+	}{
+		{
+			name:       "fail with nextRun goes to PENDING",
+			setupToken: "valid-token",
+			callToken:  "valid-token",
+			errMsg:     "temporary failure",
+			nextRun:    &future,
+			wantErr:    nil,
+			wantState:  models.JobStatePending,
+			checkFields: func(t *testing.T, j models.Job) {
+				if j.ScheduledAt == nil || j.ScheduledAt.Before(now) {
+					t.Errorf("scheduled_at = %v, want future time", j.ScheduledAt)
+				}
+				if j.LastError != "temporary failure" {
+					t.Errorf("last_error = %q, want 'temporary failure'", j.LastError)
+				}
+				if j.CompletedAt != nil {
+					t.Error("completed_at should be NULL for PENDING")
+				}
+				if j.StartedAt != nil {
+					t.Error("started_at should be NULL")
+				}
+				if j.LeaseExpiresAt != nil {
+					t.Error("lease_expires_at should be NULL")
+				}
+				if j.LeaseToken != "" {
+					t.Errorf("lease_token = %q, want empty", j.LeaseToken)
+				}
+			},
+		},
+		{
+			name:       "fail with nil nextRun goes to DEAD",
+			setupToken: "valid-token",
+			callToken:  "valid-token",
+			errMsg:     "permanent failure",
+			nextRun:    nil,
+			wantErr:    nil,
+			wantState:  models.JobStateDead,
+			checkFields: func(t *testing.T, j models.Job) {
+				if j.CompletedAt == nil {
+					t.Error("completed_at should be set for DEAD")
+				}
+				if j.LastError != "permanent failure" {
+					t.Errorf("last_error = %q, want 'permanent failure'", j.LastError)
+				}
+				if j.StartedAt != nil {
+					t.Error("started_at should be NULL")
+				}
+				if j.LeaseExpiresAt != nil {
+					t.Error("lease_expires_at should be NULL")
+				}
+				if j.LeaseToken != "" {
+					t.Errorf("lease_token = %q, want empty", j.LeaseToken)
+				}
+			},
+		},
+		{
+			name:       "fail with stale token returns ErrLeaseLost",
+			setupToken: "valid-token",
+			callToken:  "stale-token",
+			errMsg:     "error",
+			nextRun:    &future,
+			wantErr:    ErrLeaseLost,
+			wantState:  models.JobStateRunning,
+			checkFields: func(t *testing.T, j models.Job) {
+				if j.LeaseToken != "valid-token" {
+					t.Errorf("lease_token = %q, want valid-token (unchanged)", j.LeaseToken)
+				}
+			},
+		},
+		{
+			name:       "fail with empty token returns ErrInvalidTransition",
+			setupToken: "valid-token",
+			callToken:  "",
+			errMsg:     "error",
+			nextRun:    nil,
+			wantErr:    ErrInvalidTransition,
+			wantState:  models.JobStateRunning,
+			checkFields: func(t *testing.T, j models.Job) {
+				if j.LeaseToken != "valid-token" {
+					t.Errorf("lease_token = %q, want valid-token (unchanged)", j.LeaseToken)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "test-fail-" + time.Now().UTC().Format("20060102150405.000000000")
+			job := models.Job{
+				ID:          id,
+				Task:        models.Task{ID: id, Name: "send-email", Queue: "default"},
+				State:       models.JobStatePending,
+				ScheduledAt: &now,
+				CreatedAt:   now,
+				Attempt:     1,
+			}
+			if err := s.CreateJob(ctx, job); err != nil {
+				t.Fatalf("CreateJob: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = pool.Exec(context.Background(), "DELETE FROM jobs WHERE id = $1", id)
+			})
+
+			// Claim the job with the setup token
+			_, err := pool.Exec(ctx, `
+				UPDATE jobs
+				SET state = 'RUNNING',
+					lease_token = $1,
+					lease_expires_at = NOW() + INTERVAL '1 minute',
+					started_at = NOW()
+				WHERE id = $2
+			`, tc.setupToken, id)
+			if err != nil {
+				t.Fatalf("setup claim: %v", err)
+			}
+
+			err = s.FailClaimedJob(ctx, id, tc.callToken, tc.errMsg, tc.nextRun)
+			if err != tc.wantErr {
+				t.Fatalf("FailClaimedJob: got error %v, want %v", err, tc.wantErr)
+			}
+
+			got, err := s.GetJob(ctx, id)
+			if err != nil {
+				t.Fatalf("GetJob: %v", err)
+			}
+			if got.State != tc.wantState {
+				t.Errorf("state = %s, want %s", got.State, tc.wantState)
+			}
+			if got.Attempt != 1 {
+				t.Errorf("attempt = %d, want 1 (unchanged)", got.Attempt)
+			}
+			if tc.checkFields != nil {
+				tc.checkFields(t, got)
+			}
+		})
 	}
 }

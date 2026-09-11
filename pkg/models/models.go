@@ -28,20 +28,23 @@ type Task struct {
 
 // Job is the durable execution record that moves through the state machine.
 type Job struct {
-	ID             string            `json:"id"`
-	IdempotencyKey string            `json:"idempotency_key,omitempty"`
-	Task           Task              `json:"task"`
-	State          JobState          `json:"state"`
-	Attempt        int               `json:"attempt"`
-	ScheduledAt    *time.Time        `json:"scheduled_at,omitempty"`
-	StartedAt      *time.Time        `json:"started_at,omitempty"`
-	LeaseExpiresAt *time.Time        `json:"lease_expires_at,omitempty"`
-	LeaseToken     string            `json:"lease_token,omitempty"`
-	CompletedAt    *time.Time        `json:"completed_at,omitempty"`
-	LastError      string            `json:"last_error,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
-	CreatedAt      time.Time         `json:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
+	ID             string     `json:"id"`
+	IdempotencyKey string     `json:"idempotency_key,omitempty"`
+	Task           Task       `json:"task"`
+	State          JobState   `json:"state"`
+	Attempt        int        `json:"attempt"`
+	ScheduledAt    *time.Time `json:"scheduled_at,omitempty"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	// LeaseToken is a fencing token used by workers to prove they still hold the
+	// lease when completing or failing a job. It is never serialized to JSON
+	// because only the claim response should include it, not GET /api/jobs/:id.
+	LeaseToken  string            `json:"-"`
+	CompletedAt *time.Time        `json:"completed_at,omitempty"`
+	LastError   string            `json:"last_error,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
 type HTTPConfig struct {
@@ -49,6 +52,7 @@ type HTTPConfig struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
+	APIKeys      []string
 }
 
 type KafkaConfig struct {
@@ -85,6 +89,7 @@ type WorkerConfig struct {
 	Concurrency     int
 	QueueSize       int
 	ShutdownTimeout time.Duration
+	Queues          []string
 }
 
 type SchedulerConfig struct {

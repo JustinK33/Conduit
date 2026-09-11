@@ -69,12 +69,18 @@ func (m mockStore) GetJobByIdempotencyKey(context.Context, string) (models.Job, 
 	return m.idempotencyJob, m.idempotencyGetErr
 }
 func (m mockStore) CancelJob(context.Context, string) error { return nil }
-func (m mockStore) ClaimNextJob(context.Context, time.Duration) (models.Job, error) {
+func (m mockStore) ClaimNextJob(context.Context, time.Duration, []string) (models.Job, error) {
 	return models.Job{}, nil
 }
 func (m mockStore) RenewLease(context.Context, models.Job, time.Duration) error { return nil }
 func (m mockStore) RequeueExpiredRunning(context.Context, int) (int, error)     { return 0, nil }
 func (m mockStore) ReleaseClaim(context.Context, models.Job, string) error      { return nil }
+func (m mockStore) CompleteClaimedJob(context.Context, string, string, map[string]string) error {
+	return nil
+}
+func (m mockStore) FailClaimedJob(context.Context, string, string, string, *time.Time) error {
+	return nil
+}
 func (m mockStore) ListJobs(context.Context, store.ListFilter) ([]models.Job, string, error) {
 	return nil, "", nil
 }

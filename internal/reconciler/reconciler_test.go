@@ -25,7 +25,7 @@ type fakeStore struct {
 	releasedReason string
 }
 
-func (fake *fakeStore) ClaimNextJob(_ context.Context, leaseDuration time.Duration) (models.Job, error) {
+func (fake *fakeStore) ClaimNextJob(_ context.Context, leaseDuration time.Duration, _ []string) (models.Job, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	fake.leaseDuration = leaseDuration

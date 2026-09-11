@@ -237,7 +237,7 @@ I built all three because I wanted to know exactly what each one cost, and now t
 
 ## Documentation
 
-- [docs/decisions/](docs/decisions/) is five decision records with a column for the uncomfortable part of each: Postgres as the source of truth, Kafka as transport only, Redlock over advisory locks, leases instead of Kafka redelivery, and the webhook execution model.
+- [docs/decisions/](docs/decisions/) is six decision records with a column for the uncomfortable part of each: Postgres as the source of truth, Kafka as transport only, Redlock over advisory locks, leases instead of Kafka redelivery, the webhook execution model, and workers pulling over HTTP instead of importing an SDK.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the reference: system diagram, job state machine, and a package-by-package breakdown.
 - [PROJECT.md](PROJECT.md) has the API surface with curl examples and response shapes, plus the config table.
 - [docs/FEATURES.md](docs/FEATURES.md) goes deep on four pieces: the async publish and its tradeoff, Redlock, the Kubernetes manifests, and the CI/CD pipeline.
