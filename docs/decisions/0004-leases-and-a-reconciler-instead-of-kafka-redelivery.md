@@ -22,20 +22,20 @@ Nothing outside Postgres knows the job is orphaned.
 
 Both problems are solved by the same mechanism: a lease with an expiry, and a loop that looks for expired ones.
 
-`ClaimNextJob` sets `lease_expires_at = now + RECONCILER_RUNNING_LEASE` and mints a `lease_token`.
+`ClaimNextJob` sets `lease_expires_at = now + CONDUIT_RECONCILER_RUNNING_LEASE` and mints a `lease_token`.
 While a job runs, `startLeaseRenewal` pushes the expiry out at half the lease interval, so a live worker keeps its claim indefinitely.
 A dead worker stops renewing.
 
-The reconciler (`internal/reconciler/reconciler.go`) ticks every `RECONCILER_INTERVAL` and does two things per tick:
+The reconciler (`internal/reconciler/reconciler.go`) ticks every `CONDUIT_RECONCILER_INTERVAL` and does two things per tick:
 
 1. `RequeueExpiredRunning` moves rows whose lease has expired back to `PENDING`, or to `DEAD` if they are out of retries.
-2. `ClaimNextJob` in a loop, up to `RECONCILER_BATCH_SIZE`, submitting each claimed job to the pool with `SubmitBlocking`.
+2. `ClaimNextJob` in a loop, up to `CONDUIT_RECONCILER_BATCH_SIZE`, submitting each claimed job to the pool with `SubmitBlocking`.
 
 Step 2 is what makes delayed retry work: a retried job is written `PENDING` with a future `scheduled_at` and is not published to Kafka at all.
 `ClaimNextJob` filters on `scheduled_at <= NOW()`, so the job is simply invisible until it is due.
 No spin, no wasted broker traffic, no in-worker sleeping.
 
-The tick interval backs off to `RECONCILER_IDLE_INTERVAL` (default 15s) when a tick finds nothing, so an idle deployment is not polling once a second forever.
+The tick interval backs off to `CONDUIT_RECONCILER_IDLE_INTERVAL` (default 15s) when a tick finds nothing, so an idle deployment is not polling once a second forever.
 
 ## Consequences
 
@@ -47,7 +47,7 @@ Good:
 
 Costs, stated plainly:
 
-- **Recovery time is bounded below by the lease duration.** A worker killed one second into a job holds that job for the full remaining lease. With the default `RECONCILER_RUNNING_LEASE` of 5 minutes, a `SIGKILL` means up to a five-minute delay before anything retries. The README measures this with a 15-second lease to keep the run short; scale the number by your lease setting. Shortening the lease shortens recovery and raises the risk of requeuing a job that is merely slow, which is why the fencing token from [0003](0003-redlock-over-postgres-advisory-locks.md) has to exist.
-- **Dispatch throughput is capped at `RECONCILER_BATCH_SIZE` per tick.** With the defaults that is 100 jobs per second per instance, and the claims are sequential round trips, so the real figure is lower. Whenever the Kafka path is not delivering, that cap is the system's throughput. The README's drain measurements show exactly this.
+- **Recovery time is bounded below by the lease duration.** A worker killed one second into a job holds that job for the full remaining lease. With the default `CONDUIT_RECONCILER_RUNNING_LEASE` of 5 minutes, a `SIGKILL` means up to a five-minute delay before anything retries. The README measures this with a 15-second lease to keep the run short; scale the number by your lease setting. Shortening the lease shortens recovery and raises the risk of requeuing a job that is merely slow, which is why the fencing token from [0003](0003-redlock-over-postgres-advisory-locks.md) has to exist.
+- **Dispatch throughput is capped at `CONDUIT_RECONCILER_BATCH_SIZE` per tick.** With the defaults that is 100 jobs per second per instance, and the claims are sequential round trips, so the real figure is lower. Whenever the Kafka path is not delivering, that cap is the system's throughput. The README's drain measurements show exactly this.
 - A lease renewal goroutine per in-flight job, ticking at lease/2.
 - Two ways a job can reach a worker, which is a branch in `jobWorker.Run` that has to stay correct in both directions.

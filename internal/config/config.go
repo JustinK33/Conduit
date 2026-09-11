@@ -93,6 +93,16 @@ func Load() (models.Config, error) {
 	return LoadFromEnvironment(osEnv{})
 }
 
+// envPrefix namespaces every variable Conduit reads, so the names in
+// LoadFromEnvironment are written bare and prefixed in exactly one place:
+// HTTP_ADDRESS below is CONDUIT_HTTP_ADDRESS in the environment.
+//
+// API_KEYS and POSTGRES_DSN are the reason it exists. Both are generic enough to
+// already mean something else in a shared .env, docker-compose.yml sets
+// POSTGRES_DB, POSTGRES_USER, and POSTGRES_PASSWORD for the database service,
+// and a silent collision on the key list is one that hands out a credential.
+const envPrefix = "CONDUIT_"
+
 // LoadFromEnvironment merges defaults with values pulled from env. Empty or
 // unparseable values fall through to the default rather than erroring - only
 // Validate enforces required fields.
@@ -166,26 +176,26 @@ func LoadFromEnvironment(env Environment) (models.Config, error) {
 
 func Validate(cfg models.Config) error {
 	if cfg.Postgres.DSN == "" {
-		return fmt.Errorf("config: POSTGRES_DSN is required")
+		return fmt.Errorf("config: CONDUIT_POSTGRES_DSN is required")
 	}
 	if len(cfg.Kafka.Brokers) == 0 {
-		return fmt.Errorf("config: KAFKA_BROKERS is required")
+		return fmt.Errorf("config: CONDUIT_KAFKA_BROKERS is required")
 	}
 	if cfg.Kafka.Topic == "" {
-		return fmt.Errorf("config: KAFKA_TOPIC is required")
+		return fmt.Errorf("config: CONDUIT_KAFKA_TOPIC is required")
 	}
 	if cfg.Worker.Concurrency <= 0 {
-		return fmt.Errorf("config: WORKER_CONCURRENCY must be > 0, got %d", cfg.Worker.Concurrency)
+		return fmt.Errorf("config: CONDUIT_WORKER_CONCURRENCY must be > 0, got %d", cfg.Worker.Concurrency)
 	}
 	if cfg.Webhook.Timeout <= 0 {
-		return fmt.Errorf("config: WEBHOOK_TIMEOUT must be > 0, got %s", cfg.Webhook.Timeout)
+		return fmt.Errorf("config: CONDUIT_WEBHOOK_TIMEOUT must be > 0, got %s", cfg.Webhook.Timeout)
 	}
 	if cfg.Webhook.MaxRedirects < 0 {
-		return fmt.Errorf("config: WEBHOOK_MAX_REDIRECTS must be >= 0, got %d", cfg.Webhook.MaxRedirects)
+		return fmt.Errorf("config: CONDUIT_WEBHOOK_MAX_REDIRECTS must be >= 0, got %d", cfg.Webhook.MaxRedirects)
 	}
 	for _, key := range cfg.HTTP.APIKeys {
 		if len(key) < 16 {
-			return fmt.Errorf("config: API_KEYS must be at least 16 characters each, got one with length %d", len(key))
+			return fmt.Errorf("config: CONDUIT_API_KEYS must be at least 16 characters each, got one with length %d", len(key))
 		}
 	}
 	return nil
@@ -196,7 +206,7 @@ type envParser struct {
 }
 
 func (p envParser) lookup(key string) (string, bool) {
-	v, ok := p.env.LookupEnv(key)
+	v, ok := p.env.LookupEnv(envPrefix + key)
 	if !ok || v == "" {
 		return "", false
 	}

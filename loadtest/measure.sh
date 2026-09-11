@@ -162,12 +162,12 @@ run_dispatch_latency() {
 
 # ---------------------------------------------------------------------------
 # crash: SIGKILL the app while jobs are RUNNING, then time recovery. Recovery is
-# bounded below by RECONCILER_RUNNING_LEASE, which is the whole point.
+# bounded below by CONDUIT_RECONCILER_RUNNING_LEASE, which is the whole point.
 # ---------------------------------------------------------------------------
 run_crash() {
   local lease="${1:-15s}" jobs="${2:-20}"
   echo "### crash (lease=$lease, jobs=$jobs)" >&2
-  WORKERS="$jobs" base_app RECONCILER_RUNNING_LEASE="$lease"
+  WORKERS="$jobs" base_app CONDUIT_RECONCILER_RUNNING_LEASE="$lease"
   reset_jobs
 
   # /delay/8 holds each job in RUNNING long enough to be killed mid-execution.
@@ -216,22 +216,22 @@ base_app() {
     --bootstrap-server localhost:9092 --create --if-not-exists \
     --topic "$topic" --partitions 3 >/dev/null 2>&1
   recreate_app \
-    WEBHOOK_ALLOW_PRIVATE_NETWORKS=true \
-    WORKER_CONCURRENCY="$WORKERS" \
-    KAFKA_TOPIC="$topic" \
-    KAFKA_CONSUMER_GROUP="conduit-workers-$run_id" \
+    CONDUIT_WEBHOOK_ALLOW_PRIVATE_NETWORKS=true \
+    CONDUIT_WORKER_CONCURRENCY="$WORKERS" \
+    CONDUIT_KAFKA_TOPIC="$topic" \
+    CONDUIT_KAFKA_CONSUMER_GROUP="conduit-workers-$run_id" \
     "$@"
 }
 
 case "${1:-all}" in
   intake)   base_app; run_intake ;;
   drain)    base_app; run_drain "defaults" ;;
-  drain-b)  base_app REDIS_ADDRESSES=redis:6379; run_drain "redis1" ;;
+  drain-b)  base_app CONDUIT_REDIS_ADDRESSES=redis:6379; run_drain "redis1" ;;
   # The defaults throttle dispatch, not execution: a burst bigger than
-  # WORKER_QUEUE_SIZE spills off the Kafka fast path onto the reconciler, which
-  # is capped at RECONCILER_BATCH_SIZE per tick. This is the same run untuned.
+  # CONDUIT_WORKER_QUEUE_SIZE spills off the Kafka fast path onto the reconciler,
+  # capped at CONDUIT_RECONCILER_BATCH_SIZE per tick. Same run, untuned.
   drain-tuned)
-    WORKERS=32 base_app RECONCILER_BATCH_SIZE=2000 WORKER_QUEUE_SIZE=4096
+    WORKERS=32 base_app CONDUIT_RECONCILER_BATCH_SIZE=2000 CONDUIT_WORKER_QUEUE_SIZE=4096
     WORKERS=32 run_drain "tuned"
     ;;
   dispatch) base_app; run_dispatch_latency "kafka-up" "${2:-20}" ;;

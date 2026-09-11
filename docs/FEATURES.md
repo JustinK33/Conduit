@@ -96,7 +96,7 @@ pgCfg.HealthCheckPeriod = cfg.Postgres.HealthCheckPeriod // 1 minute
 ```
 
 **Model fields added:** `pkg/models/models.go` → `PostgresConfig`
-**Env vars added:** `POSTGRES_MAX_CONN_LIFETIME`, `POSTGRES_MAX_CONN_IDLE_TIME`, `POSTGRES_HEALTH_CHECK_PERIOD`
+**Env vars added:** `CONDUIT_POSTGRES_MAX_CONN_LIFETIME`, `CONDUIT_POSTGRES_MAX_CONN_IDLE_TIME`, `CONDUIT_POSTGRES_HEALTH_CHECK_PERIOD`
 
 | Setting | Before | After | Why |
 |---|---|---|---|
@@ -287,7 +287,7 @@ spec:
             - configMapRef:
                 name: conduit-config   # non-secret env vars
             - secretRef:
-                name: conduit-secrets  # POSTGRES_DSN, Redis passwords
+                name: conduit-secrets  # CONDUIT_POSTGRES_DSN, Redis passwords
           readinessProbe:
             httpGet: { path: /health, port: http }
             initialDelaySeconds: 5
@@ -348,9 +348,9 @@ When average CPU across all pods exceeds 70%, Kubernetes adds pods (up to 10). W
 
 ```yaml
 data:
-  WORKER_CONCURRENCY: "50"
-  KAFKA_COMPRESSION_CODEC: "2"
-  REDIS_ADDRESSES: "redis-0:6379,redis-1:6379,redis-2:6379"
+  CONDUIT_WORKER_CONCURRENCY: "50"
+  CONDUIT_KAFKA_COMPRESSION_CODEC: "2"
+  CONDUIT_REDIS_ADDRESSES: "redis-0:6379,redis-1:6379,redis-2:6379"
   ...
 ```
 

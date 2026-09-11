@@ -28,7 +28,7 @@ If enqueueing is `POST /api/jobs`, then executing can be a `POST` too, and the q
 An unregistered `Task.Name` fails with `retry.ErrNoRetry` and the job goes straight to `DEAD` rather than looping.
 
 Because a job body is now a URL the server will fetch, the webhook executor is an SSRF sink, and `validateURL` is not optional.
-It rejects non-HTTP schemes, URLs with userinfo, the literal hostname `localhost`, and any resolved address that is loopback, private, link-local, unspecified, or multicast unless `WEBHOOK_ALLOW_PRIVATE_NETWORKS` is explicitly set.
+It rejects non-HTTP schemes, URLs with userinfo, the literal hostname `localhost`, and any resolved address that is loopback, private, link-local, unspecified, or multicast unless `CONDUIT_WEBHOOK_ALLOW_PRIVATE_NETWORKS` is explicitly set.
 Redirects are re-validated, since validating only the first hop is the same as not validating.
 
 ## Consequences
@@ -43,5 +43,5 @@ Costs, stated plainly:
 
 - **A job cannot run in your process.** There is no `conduit.Register("send-email", fn)`. If what you wanted was Sidekiq, this is the wrong tool, and that belongs in the README rather than buried here.
 - Every job now costs an HTTP round trip on top of the queue's own overhead, and the target has to be reachable from the queue's network.
-- The SSRF guard is real code with real edge cases, and it exists purely because of this decision. It also makes local development awkward: pointing a job at a service on your own machine requires `WEBHOOK_ALLOW_PRIVATE_NETWORKS=true`, which is why the load-test sink in `docker-compose.yml` sits behind a profile and the measurement harness sets that flag.
+- The SSRF guard is real code with real edge cases, and it exists purely because of this decision. It also makes local development awkward: pointing a job at a service on your own machine requires `CONDUIT_WEBHOOK_ALLOW_PRIVATE_NETWORKS=true`, which is why the load-test sink in `docker-compose.yml` sits behind a profile and the measurement harness sets that flag.
 - Handler registration is a compile-time map in `main.go`. Adding a task type means editing and redeploying the queue, which is exactly the coupling this decision was supposed to avoid, just moved. A config-driven registry would fix it and is not built.

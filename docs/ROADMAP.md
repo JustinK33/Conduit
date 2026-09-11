@@ -9,7 +9,7 @@ Each has a "done when" so it is unambiguous whether it shipped.
 ## Phase 1 - A pull-based worker API (done)
 
 Shipped. The protocol is [WORKERS.md](WORKERS.md), the reference worker is `loadtest/worker.sh`, and the deployment it assumes is [DEPLOYMENT.md](DEPLOYMENT.md).
-Verified against a live stack with `API_KEYS` set: a job enqueued to queue `remote` was claimed, executed, and completed by a shell script in a separate process; a second one failed with `retry: true`, went back to `PENDING` in one write, and reached `DEAD` when its attempt budget ran out, never appearing in `FAILED`.
+Verified against a live stack with `CONDUIT_API_KEYS` set: a job enqueued to queue `remote` was claimed, executed, and completed by a shell script in a separate process; a second one failed with `retry: true`, went back to `PENDING` in one write, and reached `DEAD` when its attempt budget ran out, never appearing in `FAILED`.
 A claim with no key returns 401, a stale token returns 409 on heartbeat, complete, and fail, and `GET /api/jobs/:id` on a RUNNING job carries no lease token.
 
 The original write-up follows, since the reasoning is still what the design is for.
@@ -32,7 +32,7 @@ POST /api/jobs/:id/fail           -> 200 {state, attempt, scheduled_at}
 It has existed since the first migration, defaults to `default`, and until now appeared in zero `WHERE` clauses.
 A remote worker claims from the queues it names, so it never wins a `webhook` job it has no code for.
 
-Exposing a claim endpoint means exposing the ability to take work, so the minimum viable auth ships in the same phase: a shared bearer token from `API_KEYS`, covering `/api/jobs` only, leaving `/live`, `/ready`, `/health`, and `/metrics` open for probes and scrapes.
+Exposing a claim endpoint means exposing the ability to take work, so the minimum viable auth ships in the same phase: a shared bearer token from `CONDUIT_API_KEYS`, covering `/api/jobs` only, leaving `/live`, `/ready`, `/health`, and `/metrics` open for probes and scrapes.
 Unset means auth is disabled, which is wrong for production and is logged as a warning at boot.
 
 The retry decision moves out of the in-process worker and into the service layer, so the HTTP `fail` endpoint and the built-in executors produce byte-identical state transitions instead of two implementations that drift.
@@ -57,7 +57,7 @@ Conduit currently requires Kafka, Postgres, and three Redis nodes to start.
 That is five services to deploy for a queue, and the measurements in the README say Kafka buys dispatch latency only, while the three-node Redlock quorum has no measurable throughput cost over a single node and no correctness role at all given Postgres is the source of truth.
 Kafka is mandatory at boot despite being explicitly best-effort at runtime, which is the worst of both.
 
-Needs `TRANSPORT=postgres|kafka` where the Postgres path uses `LISTEN`/`NOTIFY` for wake-ups, and `LOCK=none|advisory|redlock` where `advisory` uses a Postgres advisory lock.
+Needs `CONDUIT_TRANSPORT=postgres|kafka` where the Postgres path uses `LISTEN`/`NOTIFY` for wake-ups, and `CONDUIT_LOCK=none|advisory|redlock` where `advisory` uses a Postgres advisory lock.
 The default becomes Postgres-only, so the quickstart is one container plus a database.
 
 **Done when** `docker compose up postgres app` is a working Conduit and the dispatch-latency table has a row for the Postgres transport.
@@ -65,7 +65,7 @@ The default becomes Postgres-only, so the quickstart is one container plus a dat
 ## Phase 4 - The default configuration is the good one
 
 Out of the box Conduit drains about 55 jobs/s.
-Tuned, the same hardware and the same batch does roughly 5x better, and the only differences are `WORKER_QUEUE_SIZE` and `RECONCILER_BATCH_SIZE`.
+Tuned, the same hardware and the same batch does roughly 5x better, and the only differences are `CONDUIT_WORKER_QUEUE_SIZE` and `CONDUIT_RECONCILER_BATCH_SIZE`.
 Whatever an evaluator measures in the first ten minutes is the number they remember, and right now that number is the bad one.
 
 Also in this phase: the circuit breaker is a single process-global instance, so one dead endpoint opens it for every task type at once, and `ReleaseClaim` returns a job to `PENDING` without setting `scheduled_at`, so a job the pool keeps refusing spins in a claim-release loop as fast as the reconciler can tick.
@@ -103,7 +103,7 @@ Tracked here because it keeps recurring, not because it is a phase.
 
 - `PROJECT.md`'s environment table lists defaults that no longer match `internal/config/config.go`, and its statistics table says 5 API endpoints while the table above it lists 9.
 - `docs/FEATURES.md` documents probe paths, a ConfigMap, and a CI wait loop that have all since changed.
-- `METRICS_SUBSYSTEM` defaults to `server` in code, is `service` in `.env.example`, and the README quotes `conduit_service_*`, so the metric prefix depends on whether you copied the example file. Pick one name.
+- `CONDUIT_METRICS_SUBSYSTEM` defaults to `server` in code, is `service` in `.env.example`, and the README quotes `conduit_service_*`, so the metric prefix depends on whether you copied the example file. Pick one name.
 
 ## Already done
 

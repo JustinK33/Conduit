@@ -39,7 +39,7 @@ Good:
 
 - Enqueue latency is a Postgres insert, measured in the README as API p50. Moving the publish off the hot path was the single largest latency win in the project's history (`77b8508`: p50 roughly 2ms down to 0.82ms on the hardware of the day).
 - Dispatch latency is sub-second under normal operation instead of bounded by a poll interval.
-- Kafka can be down and the system still accepts and eventually runs work. The README's measured results include a run with the broker killed, and the interesting number there is what dispatch latency degrades to: `RECONCILER_BATCH_SIZE` jobs per `RECONCILER_INTERVAL`, which with the defaults is a hard ceiling of 100 jobs per second no matter how many workers are free.
+- Kafka can be down and the system still accepts and eventually runs work. The README's measured results include a run with the broker killed, and the interesting number there is what dispatch latency degrades to: `CONDUIT_RECONCILER_BATCH_SIZE` jobs per `CONDUIT_RECONCILER_INTERVAL`, which with the defaults is a hard ceiling of 100 jobs per second no matter how many workers are free.
 
 Costs, stated plainly:
 

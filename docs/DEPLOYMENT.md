@@ -9,7 +9,7 @@ This page is the recipe.
 ## Why a proxy, specifically
 
 TLS is the obvious half.
-`API_KEYS` are bearer tokens, and a bearer token over plain HTTP is a token in cleartext, readable by anything on the path.
+`CONDUIT_API_KEYS` are bearer tokens, and a bearer token over plain HTTP is a token in cleartext, readable by anything on the path.
 Building TLS into the process would mean owning certificates, ACME, renewal, SNI, and cipher policy, which Caddy and nginx already own and do better.
 
 The less obvious half is path gating, and it matters more than it looks.
@@ -18,7 +18,7 @@ That is correct inside a private network and dangerous the moment the port is pu
 
 | Path | Auth | Who should reach it |
 | --- | --- | --- |
-| `/api/jobs/*` | `API_KEYS`, when set | Clients and workers, over TLS |
+| `/api/jobs/*` | `CONDUIT_API_KEYS`, when set | Clients and workers, over TLS |
 | `/live` | None | Anyone; it touches no dependency and reveals only that the process is up |
 | `/ready` | None | Private only. It names the liveness of Postgres and every Redis node. |
 | `/health` | None | Private only. Alias of `/live`, kept for compatibility. |
@@ -34,28 +34,28 @@ It also covers three things Conduit has no code for and should not grow code for
 
 ## Bind to loopback
 
-`HTTP_ADDRESS` defaults to `:8080`, every interface.
+`CONDUIT_HTTP_ADDRESS` defaults to `:8080`, every interface.
 On a VM where the proxy is a local process, set it so nothing can bypass the proxy by hitting the port directly:
 
 ```
-HTTP_ADDRESS=127.0.0.1:8080
+CONDUIT_HTTP_ADDRESS=127.0.0.1:8080
 ```
 
 In Docker the equivalent is not publishing the port at all: drop the `ports:` mapping for the `app` service and put the proxy on the same compose network, reaching Conduit as `app:8080`.
 In Kubernetes the Service is already cluster-internal; keep it `ClusterIP` and put an Ingress in front.
 
-## TRUSTED_PROXIES
+## CONDUIT_TRUSTED_PROXIES
 
 gin trusts every proxy by default, and `internal/api/middleware.go` logs `client_ip` on every request.
 Untrusted, that means any client can forge its own address in your audit log with an `X-Forwarded-For` header.
 
-`TRUSTED_PROXIES` is a comma-separated CIDR list, and empty is the safe default: it makes gin ignore forwarding headers entirely and use the direct peer address.
+`CONDUIT_TRUSTED_PROXIES` is a comma-separated CIDR list, and empty is the safe default: it makes gin ignore forwarding headers entirely and use the direct peer address.
 
 Set it only to the network the proxy actually sits on, and only once something is genuinely in front:
 
 ```
-TRUSTED_PROXIES=127.0.0.1/32          # local Caddy or nginx
-TRUSTED_PROXIES=10.0.0.0/8            # a pod or VPC network
+CONDUIT_TRUSTED_PROXIES=127.0.0.1/32          # local Caddy or nginx
+CONDUIT_TRUSTED_PROXIES=10.0.0.0/8            # a pod or VPC network
 ```
 
 Verify it both ways rather than assuming.
@@ -68,7 +68,7 @@ The default recommendation, because certificate provisioning and renewal are aut
 
 ```caddyfile
 queue.example.com {
-	# The API. Authenticated by Conduit via API_KEYS.
+	# The API. Authenticated by Conduit via CONDUIT_API_KEYS.
 	handle /api/* {
 		request_body {
 			max_size 1MB
@@ -138,7 +138,7 @@ server {
 }
 ```
 
-With nginx in front, set `TRUSTED_PROXIES=127.0.0.1/32` so `X-Forwarded-For` is honoured from it and from nothing else.
+With nginx in front, set `CONDUIT_TRUSTED_PROXIES=127.0.0.1/32` so `X-Forwarded-For` is honoured from it and from nothing else.
 
 ## Kubernetes
 
@@ -146,13 +146,13 @@ With nginx in front, set `TRUSTED_PROXIES=127.0.0.1/32` so `X-Forwarded-For` is 
 
 The same shape applies: an Ingress plus cert-manager, with the Ingress routing `/api` and `/live` only, and the Service left `ClusterIP` so nothing else is externally reachable.
 
-`API_KEYS` belongs in the Secret, never the ConfigMap.
+`CONDUIT_API_KEYS` belongs in the Secret, never the ConfigMap.
 Copy `deploy/k8s/secret.example.yaml`, generate a real key, and do not commit the result.
 
 ```
 kubectl create secret generic conduit-secrets \
-  --from-literal=API_KEYS="$(openssl rand -hex 32)" \
-  --from-literal=POSTGRES_DSN='postgres://...'
+  --from-literal=CONDUIT_API_KEYS="$(openssl rand -hex 32)" \
+  --from-literal=CONDUIT_POSTGRES_DSN='postgres://...'
 ```
 
 Prometheus scrapes the pod or Service directly on the cluster network, never through the public proxy, so `deploy/prometheus/prometheus.yml` needs no change.
@@ -164,23 +164,23 @@ openssl rand -hex 32
 ```
 
 Each key must be at least 16 characters or the server refuses to start.
-`API_KEYS` accepts a comma-separated list and any listed key is accepted, so rotation is: add the new key, restart, move workers across, remove the old one.
+`CONDUIT_API_KEYS` accepts a comma-separated list and any listed key is accepted, so rotation is: add the new key, restart, move workers across, remove the old one.
 
 Keys go in `.env` or a Secret. Never in a config file that is committed, and never in a ConfigMap.
 
 ## Checklist
 
-- [ ] `API_KEYS` set to at least one 32-byte random key. Absent means the API is open, and the server warns about it at boot.
+- [ ] `CONDUIT_API_KEYS` set to at least one 32-byte random key. Absent means the API is open, and the server warns about it at boot.
 - [ ] TLS terminated by something in front. The server warns unconditionally that keys transit in clear, because it cannot see what is upstream.
 - [ ] `/metrics`, `/ready`, and `/health` return 404 through the proxy while still returning 200 on the private address. Test it, do not assume it.
-- [ ] `HTTP_ADDRESS` on loopback, or the port unpublished.
-- [ ] `TRUSTED_PROXIES` matching the proxy's network, or empty.
-- [ ] `WORKER_QUEUES` set if remote workers exist, or the server competes for their jobs and dead-letters them. See [WORKERS.md](WORKERS.md).
-- [ ] `POSTGRES_DSN` pointing at a database with backups. Postgres is the source of truth; losing it loses the queue.
+- [ ] `CONDUIT_HTTP_ADDRESS` on loopback, or the port unpublished.
+- [ ] `CONDUIT_TRUSTED_PROXIES` matching the proxy's network, or empty.
+- [ ] `CONDUIT_WORKER_QUEUES` set if remote workers exist, or the server competes for their jobs and dead-letters them. See [WORKERS.md](WORKERS.md).
+- [ ] `CONDUIT_POSTGRES_DSN` pointing at a database with backups. Postgres is the source of truth; losing it loses the queue.
 
 ## Known gaps
 
 - **Migrations only run on a fresh volume.** The schema is applied by mounting `migrations/` into the Postgres entrypoint, which runs once on an empty data directory. A schema change does not reach an existing database. A `migrate` subcommand is [phase 3](ROADMAP.md#phase-3---kafka-and-redis-become-optional).
-- **`METRICS_LISTEN_ADDRESS` is parsed and ignored.** `/metrics` is served on the main HTTP port, which is why the proxy has to gate it. A separate metrics listener would be the better answer.
+- **`CONDUIT_METRICS_LISTEN_ADDRESS` is parsed and ignored.** `/metrics` is served on the main HTTP port, which is why the proxy has to gate it. A separate metrics listener would be the better answer.
 - **The API key is all-or-nothing.** Holding it means claiming, cancelling, and reading every job. Per-key identity is [phase 2](ROADMAP.md#phase-2---more-than-one-tenant).
 - **`deploy/k8s/deployment.yaml` names `conduit:latest`**, which resolves to nothing. Point it at your registry until [phase 6](ROADMAP.md#phase-6---something-an-adopter-can-actually-pin) lands published images.

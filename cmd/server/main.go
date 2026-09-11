@@ -201,13 +201,13 @@ func run(ctx context.Context) error {
 	// gin trusts every proxy by default, which makes the client_ip in the
 	// request log forgeable by anyone sending X-Forwarded-For. Empty means
 	// trust nothing and use the peer address, which is correct when nothing is
-	// in front; set TRUSTED_PROXIES to the proxy's CIDR when something is.
+	// in front; set CONDUIT_TRUSTED_PROXIES to the proxy's CIDR when something is.
 	if err := router.SetTrustedProxies(cfg.HTTP.TrustedProxies); err != nil {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
 
 	if len(cfg.HTTP.APIKeys) == 0 {
-		log.Warn().Msg("API_KEYS is empty: /api/jobs is unauthenticated, so anyone who can reach this port can enqueue, claim, and cancel work")
+		log.Warn().Msg("CONDUIT_API_KEYS is empty: /api/jobs is unauthenticated, so anyone who can reach this port can enqueue, claim, and cancel work")
 	} else {
 		// The process cannot see what is in front of it, so this is
 		// unconditional rather than clever.
@@ -547,7 +547,7 @@ type kafkaJobHandler struct {
 	// job regardless of queue, so without this the in-process pool would run
 	// jobs meant for remote workers - and dead-letter them, since it has no
 	// handler for them - before the remote worker ever polled. Empty means all
-	// queues, matching WORKER_QUEUES everywhere else.
+	// queues, matching CONDUIT_WORKER_QUEUES everywhere else.
 	queues []string
 	log    zerolog.Logger
 }

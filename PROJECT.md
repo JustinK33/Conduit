@@ -124,7 +124,7 @@ deploy/prometheus/   ← prometheus.yml scrape config
 `state` must be one of `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `DEAD`, though `FAILED` is unreachable: nothing writes it, and a retrying job is `PENDING` with `attempt > 0`.
 The enqueue body accepts `idempotency_key` and `scheduled_at` alongside `task`.
 
-Everything under `/api/jobs` sits behind `API_KEYS` when it is set, as `Authorization: Bearer <key>`.
+Everything under `/api/jobs` sits behind `CONDUIT_API_KEYS` when it is set, as `Authorization: Bearer <key>`.
 The four claim-through-fail endpoints are the worker pull protocol; [docs/WORKERS.md](docs/WORKERS.md) is the contract, including what a worker does when a lease is lost.
 The probe and scrape routes are deliberately outside auth, which is why a deployment needs a proxy to gate them: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
@@ -163,7 +163,7 @@ curl -X POST http://localhost:8080/api/jobs/4a7b1c2d-.../complete \
 
 ## Metrics
 
-All metrics are prefixed `conduit_service_*` by default (configurable via `METRICS_NAMESPACE` / `METRICS_SUBSYSTEM`).
+All metrics are prefixed `conduit_service_*` by default (configurable via `CONDUIT_METRICS_NAMESPACE` / `CONDUIT_METRICS_SUBSYSTEM`).
 
 | Metric | Type | Description |
 |---|---|---|
@@ -205,19 +205,23 @@ make down
 
 ### Environment Variables
 
+Every variable Conduit reads is prefixed `CONDUIT_`, and an unprefixed name is ignored rather than half-honoured.
+`API_KEYS` and `POSTGRES_DSN` are why: both are generic enough to already mean something else in a shared environment, and a silent collision on the key list is one that hands out a credential.
+`.env.example` is the full list; the table below is the part you are most likely to change.
+
 | Variable | Default | Description |
 |---|---|---|
-| `POSTGRES_DSN` | `postgres://postgres:postgres@localhost:5432/conduit?sslmode=disable` | PostgreSQL connection string |
-| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker list |
-| `KAFKA_TOPIC` | `conduit.jobs` | Topic for job messages |
-| `REDIS_ADDRESSES` | `localhost:6379,localhost:6380,localhost:6381` | Comma-separated Redis addresses |
-| `HTTP_ADDRESS` | `:8080` | Server listen address. Set it to `127.0.0.1:8080` behind a local proxy. |
-| `API_KEYS` | empty | Comma-separated bearer tokens for `/api/jobs`, 16 characters minimum. Empty means the API is open. |
-| `TRUSTED_PROXIES` | empty | CIDRs whose `X-Forwarded-For` is believed. Empty trusts nothing and uses the peer address. |
-| `WORKER_QUEUES` | empty | Queues the in-process pool claims from. Empty means all of them, which competes with remote workers. |
-| `WORKER_CONCURRENCY` | `8` | Max parallel job executions |
-| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
-| `LOG_PRETTY` | `false` | Human-readable console output |
+| `CONDUIT_POSTGRES_DSN` | `postgres://postgres:postgres@localhost:5432/conduit?sslmode=disable` | PostgreSQL connection string |
+| `CONDUIT_KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker list |
+| `CONDUIT_KAFKA_TOPIC` | `conduit.jobs` | Topic for job messages |
+| `CONDUIT_REDIS_ADDRESSES` | `localhost:6379,localhost:6380,localhost:6381` | Comma-separated Redis addresses |
+| `CONDUIT_HTTP_ADDRESS` | `:8080` | Server listen address. Set it to `127.0.0.1:8080` behind a local proxy. |
+| `CONDUIT_API_KEYS` | empty | Comma-separated bearer tokens for `/api/jobs`, 16 characters minimum. Empty means the API is open. |
+| `CONDUIT_TRUSTED_PROXIES` | empty | CIDRs whose `X-Forwarded-For` is believed. Empty trusts nothing and uses the peer address. |
+| `CONDUIT_WORKER_QUEUES` | empty | Queues the in-process pool claims from. Empty means all of them, which competes with remote workers. |
+| `CONDUIT_WORKER_CONCURRENCY` | `8` | Max parallel job executions |
+| `CONDUIT_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+| `CONDUIT_LOG_PRETTY` | `false` | Human-readable console output |
 
 ---
 
@@ -260,4 +264,4 @@ The tuning that drove the intake numbers:
 - pgx pool: MaxConns 25 → 50, added MaxConnLifetime / MaxConnIdleTime / HealthCheckPeriod
 - Kafka producer: snappy compression, 5ms flush frequency, 1MiB flush threshold, 256-deep channel buffer
 
-`WORKER_QUEUE_SIZE` is the knob that dominates execution throughput, not `WORKER_CONCURRENCY`; the README explains why.
+`CONDUIT_WORKER_QUEUE_SIZE` is the knob that dominates execution throughput, not `CONDUIT_WORKER_CONCURRENCY`; the README explains why.

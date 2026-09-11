@@ -139,7 +139,7 @@ blocks on SIGTERM/SIGINT. Implements `jobWorker` (the `worker.JobRunner` that
 runs the circuit breaker / Redlock / execute chain) and `kafkaJobHandler` (the
 consumer bridge that feeds the pool). Drains in-flight work before exit.
 
-Both entry points into the in-process pool respect `WORKER_QUEUES`: the reconciler
+Both entry points into the in-process pool respect `CONDUIT_WORKER_QUEUES`: the reconciler
 passes it to `ClaimNextJob`, and `kafkaJobHandler` filters on `task.queue` before
 submitting, because the topic carries every job regardless of queue. Without both,
 the server would win jobs meant for a remote worker and dead-letter them for having
@@ -153,7 +153,7 @@ This turns the queue into a small data workflow runtime for operational analytic
 
 ### `internal/api`
 Nine Gin job endpoints, registered in `RegisterRoutes`. The whole group sits behind
-`APIKeyAuth(h.APIKeys)`, which is a pass-through when `API_KEYS` is unset.
+`APIKeyAuth(h.APIKeys)`, which is a pass-through when `CONDUIT_API_KEYS` is unset.
 
 | Method | Path | Notes |
 |--------|------|-------|
@@ -200,7 +200,7 @@ is where the retry decision lives, which is why it takes an id and a token rathe
 than a job: one entry point means the remote path and the in-process path cannot
 drift into two retry policies. It costs one extra `SELECT`, on the failure path
 only. Lease durations requested by a client are clamped to
-`RECONCILER_RUNNING_LEASE`, so a worker cannot park a job for a week.
+`CONDUIT_RECONCILER_RUNNING_LEASE`, so a worker cannot park a job for a week.
 
 ### `internal/store`
 `PostgresStore` with a pgx pool. The interesting bit is `ClaimNextJob`:

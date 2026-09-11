@@ -35,7 +35,7 @@ Both fields are optional, and an entirely empty body is a valid claim.
 Omitting it claims from every queue, including queues whose jobs your worker has no code for, and a job you claim and cannot run is a job nobody else can run either.
 
 `lease_seconds` is a request, not a grant.
-The server clamps it to `RECONCILER_RUNNING_LEASE` (default 5 minutes) and uses that as the default when you omit it.
+The server clamps it to `CONDUIT_RECONCILER_RUNNING_LEASE` (default 5 minutes) and uses that as the default when you omit it.
 Trust `lease_expires_at` in the response, not the number you asked for.
 
 `200` returns the job:
@@ -168,13 +168,13 @@ The codes are stable, so branch on `error.code` rather than on the status alone.
 
 ## Auth
 
-Set `API_KEYS` on the server to a comma-separated list of keys, each at least 16 characters.
+Set `CONDUIT_API_KEYS` on the server to a comma-separated list of keys, each at least 16 characters.
 Generate them with `openssl rand -hex 32`.
 Send one as `Authorization: Bearer <key>`; the scheme is case-insensitive.
 
 Any configured key is accepted, so rotation is: add the new key, restart, move workers over, remove the old one.
 
-If `API_KEYS` is unset the API is open and the server says so loudly at boot.
+If `CONDUIT_API_KEYS` is unset the API is open and the server says so loudly at boot.
 That is fine on a laptop and wrong everywhere else.
 
 Two things to know before you point a worker at anything but localhost:
@@ -226,10 +226,10 @@ Quote `request_id` when reporting a problem; it appears in the server logs for t
 The server also runs its own worker pool over the handlers registered in `cmd/server/main.go`, and by default that pool claims from **every** queue.
 It will therefore win jobs meant for your remote workers, find no registered handler, and dead-letter them.
 
-So the moment you run a remote worker, set `WORKER_QUEUES` on the server to the queues it should handle itself, and give your remote workers their own queue names.
+So the moment you run a remote worker, set `CONDUIT_WORKER_QUEUES` on the server to the queues it should handle itself, and give your remote workers their own queue names.
 That filter applies to both paths the in-process pool receives work on, the reconciler and the Kafka consumer.
 
-There is no switch that turns the pool off, so if the server should only ever hand work out, point `WORKER_QUEUES` at a queue name nothing is ever enqueued to.
+There is no switch that turns the pool off, so if the server should only ever hand work out, point `CONDUIT_WORKER_QUEUES` at a queue name nothing is ever enqueued to.
 
 ## Not there yet
 

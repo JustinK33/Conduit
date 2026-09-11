@@ -60,7 +60,7 @@ Harmless while nothing accepted a token as input; a hijack primitive the moment 
 It is now `json:"-"` and appears only in the claim response.
 
 Auth ships in the same change, because an unauthenticated claim endpoint is a way for anyone to take work and drop it.
-`API_KEYS` is a shared bearer token covering `/api/jobs` only.
+`CONDUIT_API_KEYS` is a shared bearer token covering `/api/jobs` only.
 It mounts on the route group rather than the root router, deliberately: `/live`, `/ready`, `/health`, and `/metrics` are registered on the root and would otherwise start returning 401 to Kubernetes probes and Prometheus.
 
 ## Consequences
@@ -77,7 +77,7 @@ Costs, stated plainly:
 
 - **Correctness now depends on clients behaving.** A worker that claims and vanishes costs a full lease duration before the job is retried, five minutes by default. Webhook execution had a timeout the server controlled; pull execution does not. The lease is the only bound, which makes [0004](0004-leases-and-a-reconciler-instead-of-kafka-redelivery.md)'s five-minute default matter far more than it did.
 - **Claim is a poll.** There is no long-poll and no `LISTEN`/`NOTIFY`, so an idle worker wakes up, asks, gets a 204, and sleeps. That costs a query per poll per worker and adds up with worker count long before it adds up with job count. Long-polling is the fix and is not built.
-- **One shared key, no identity.** Holding `API_KEYS` means being able to claim, cancel, and read every job in the instance. There is no per-worker identity, so two teams cannot share a deployment, and a leaked key cannot be rotated for one caller without rotating it for all of them. This is phase 2 in `docs/ROADMAP.md` and it is the largest thing still missing.
+- **One shared key, no identity.** Holding `CONDUIT_API_KEYS` means being able to claim, cancel, and read every job in the instance. There is no per-worker identity, so two teams cannot share a deployment, and a leaked key cannot be rotated for one caller without rotating it for all of them. This is phase 2 in `docs/ROADMAP.md` and it is the largest thing still missing.
 - **No worker identity in the database either.** The `jobs` table has no `worker_id` or `claimed_by` column, so "which worker is running this" is not answerable, and neither is "this host is wedged, requeue everything it holds."
 - **`Task.Queue` changes meaning.** It was an inert label that was persisted and read back and routed nothing. It now decides who can claim a job. Anything already setting a non-default queue value gets different behaviour, and the reason that is acceptable rather than a breaking change is that the field routed nothing at all before, so nothing could have depended on it.
 - **Two execution models to keep in step.** The built-in handlers and remote workers now have to produce identical state transitions. Sharing the service layer is what makes that true, and it is a property that has to be actively maintained rather than one the types enforce.

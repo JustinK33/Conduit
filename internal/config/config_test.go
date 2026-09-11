@@ -44,7 +44,7 @@ func TestLoadFromEnvironment(t *testing.T) {
 		{
 			name: "reads HTTP address from environment",
 			env: mockEnvironment{values: map[string]string{
-				"HTTP_ADDRESS": ":8080",
+				"CONDUIT_HTTP_ADDRESS": ":8080",
 			}},
 			wantErr: false,
 		},
@@ -72,9 +72,9 @@ func TestLoadFromEnvironment(t *testing.T) {
 
 func TestLoadFromEnvironmentReadsWebhookConfig(t *testing.T) {
 	cfg, err := LoadFromEnvironment(mockEnvironment{values: map[string]string{
-		"WEBHOOK_TIMEOUT":                "3s",
-		"WEBHOOK_MAX_REDIRECTS":          "2",
-		"WEBHOOK_ALLOW_PRIVATE_NETWORKS": "true",
+		"CONDUIT_WEBHOOK_TIMEOUT":                "3s",
+		"CONDUIT_WEBHOOK_MAX_REDIRECTS":          "2",
+		"CONDUIT_WEBHOOK_ALLOW_PRIVATE_NETWORKS": "true",
 	}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -172,7 +172,7 @@ func TestValidate(t *testing.T) {
 
 func TestLoadFromEnvironmentParsesAPIKeys(t *testing.T) {
 	cfg, err := LoadFromEnvironment(mockEnvironment{values: map[string]string{
-		"API_KEYS": "key-one-0123456789,key-two-abcdefghij,key-three-xyz123456",
+		"CONDUIT_API_KEYS": "key-one-0123456789,key-two-abcdefghij,key-three-xyz123456",
 	}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -193,10 +193,10 @@ func TestLoadFromEnvironmentParsesAPIKeys(t *testing.T) {
 
 func TestLoadFromEnvironmentTrimsWhitespaceInCommaSeparatedLists(t *testing.T) {
 	cfg, err := LoadFromEnvironment(mockEnvironment{values: map[string]string{
-		"API_KEYS":        "key-one-0123456789, key-two-abcdefghij , key-three-xyz123456",
-		"WORKER_QUEUES":   "queue-a , queue-b,  queue-c  ",
-		"KAFKA_BROKERS":   "localhost:9092 , kafka:9092",
-		"REDIS_ADDRESSES": "redis:6379 , redis-2:6379",
+		"CONDUIT_API_KEYS":        "key-one-0123456789, key-two-abcdefghij , key-three-xyz123456",
+		"CONDUIT_WORKER_QUEUES":   "queue-a , queue-b,  queue-c  ",
+		"CONDUIT_KAFKA_BROKERS":   "localhost:9092 , kafka:9092",
+		"CONDUIT_REDIS_ADDRESSES": "redis:6379 , redis-2:6379",
 	}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -224,6 +224,26 @@ func TestLoadFromEnvironmentTrimsWhitespaceInCommaSeparatedLists(t *testing.T) {
 	}
 	if cfg.Redis.Addresses[0] != "redis:6379" || cfg.Redis.Addresses[1] != "redis-2:6379" {
 		t.Errorf("REDIS_ADDRESSES not trimmed: %v", cfg.Redis.Addresses)
+	}
+}
+
+// Every variable is namespaced, and an unprefixed name must be ignored rather
+// than half-honoured. API_KEYS is the case that matters: something else in a
+// shared environment owning that name must not be able to set who may claim
+// jobs here.
+func TestLoadFromEnvironmentIgnoresUnprefixedNames(t *testing.T) {
+	cfg, err := LoadFromEnvironment(mockEnvironment{values: map[string]string{
+		"API_KEYS":     "someone-elses-key-0123456789",
+		"HTTP_ADDRESS": ":9999",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.HTTP.APIKeys) != 0 {
+		t.Errorf("unprefixed API_KEYS was read: %v", cfg.HTTP.APIKeys)
+	}
+	if cfg.HTTP.Address != Default().HTTP.Address {
+		t.Errorf("unprefixed HTTP_ADDRESS was read: %q", cfg.HTTP.Address)
 	}
 }
 

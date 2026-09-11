@@ -81,7 +81,7 @@ make ready                                     # per-dependency readiness
 ### Run your own worker
 
 [`loadtest/worker.sh`](loadtest/worker.sh) is a complete worker in about 40 lines of shell.
-Set `WORKER_QUEUES` on the server first, or the server's own pool competes for the jobs your worker is meant to run:
+Set `CONDUIT_WORKER_QUEUES` on the server first, or the server's own pool competes for the jobs your worker is meant to run:
 
 ```bash
 make worker queues=remote     # claims, executes, reports; Ctrl-C to stop
@@ -89,7 +89,7 @@ make worker queues=remote     # claims, executes, reports; Ctrl-C to stop
 
 [docs/WORKERS.md](docs/WORKERS.md) is the protocol: the four endpoints, the lease contract, and what to do when you lose one.
 
-Set `API_KEYS` in `.env` (`openssl rand -hex 32`) to stop the API being open, then pass the same key to the Make targets as `API_KEY=...`.
+Set `CONDUIT_API_KEYS` in `.env` (`openssl rand -hex 32`) to stop the API being open, then pass the same key to the Make targets as `API_KEY=...`.
 Conduit does not speak TLS, so anything beyond a laptop needs a reverse proxy in front: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ### Measure it
@@ -110,7 +110,7 @@ That means the load generator, the broker, three Redis nodes, Postgres, and the 
 
 ### Intake
 
-k6, 100 VUs, 10 s ramp / 30 s hold / 10 s ramp-down, `WORKER_CONCURRENCY=8`.
+k6, 100 VUs, 10 s ramp / 30 s hold / 10 s ramp-down, `CONDUIT_WORKER_CONCURRENCY=8`.
 
 | | |
 | --- | --- |
@@ -119,7 +119,7 @@ k6, 100 VUs, 10 s ramp / 30 s hold / 10 s ramp-down, `WORKER_CONCURRENCY=8`.
 | Failed requests | 0 |
 | Peak queue depth | 234,263 `PENDING` |
 
-This is a re-measurement after the pull API landed, with `API_KEYS` unset so the auth middleware is the pass-through.
+This is a re-measurement after the pull API landed, with `CONDUIT_API_KEYS` unset so the auth middleware is the pass-through.
 The previous run was 4,864 req/s at p50 1.39 ms, so the four new endpoints and the queue filter cost nothing outside run-to-run variance.
 
 This measures intake only, and the peak queue depth is the tell: the API accepts jobs about 90x faster than the system executes them.
@@ -134,14 +134,14 @@ Latency is end-to-end wall clock out of Postgres (`updated_at - created_at`), no
 | Config | jobs/s | e2e p50 | e2e p99 |
 | --- | --- | --- | --- |
 | Defaults: concurrency 8, queue 256, reconciler batch 100 | 39.5 - 78.7 (5 runs) | 18.5 s | 26.8 s |
-| `WORKER_QUEUE_SIZE=4096` | 195.3 | 1.69 s | - |
-| `RECONCILER_BATCH_SIZE=2000` | 133.4 | 0.22 s | 14.0 s |
+| `CONDUIT_WORKER_QUEUE_SIZE=4096` | 195.3 | 1.69 s | - |
+| `CONDUIT_RECONCILER_BATCH_SIZE=2000` | 133.4 | 0.22 s | 14.0 s |
 | All of the above, concurrency 32 | 530.5 | 1.86 s | 3.10 s |
 
 The default configuration is the bottleneck, not the architecture.
 Mean time inside a worker is 5.76 ms (`conduit_service_job_duration_seconds_sum / _count` over the 2,000-job run), so eight workers should manage roughly 1,400 jobs/s.
 They manage 55.
-A burst larger than `WORKER_QUEUE_SIZE=256` gets refused by the pool, falls off the Kafka fast path, and lands on the reconciler, whose `RECONCILER_BATCH_SIZE=100` claims per one-second tick becomes the real ceiling.
+A burst larger than `CONDUIT_WORKER_QUEUE_SIZE=256` gets refused by the pool, falls off the Kafka fast path, and lands on the reconciler, whose `CONDUIT_RECONCILER_BATCH_SIZE=100` claims per one-second tick becomes the real ceiling.
 Raising the pool's buffer is the single biggest win because it keeps work on the fast path at all.
 
 Run-to-run variance on the default config is about +/- 40% (39.6, 56.3, 54.0, 78.7, 39.5 jobs/s), which is why that row is a range.
@@ -157,7 +157,7 @@ Anything in this table under a 2x difference is noise.
 | Reconciler only (broker killed) | 3,796.3 ms | 13,159.8 ms | 14,201.4 ms |
 
 Roughly 255x on median dispatch latency, and that is Kafka's entire contribution.
-The reconciler-only numbers are not a bug: an idle reconciler backs off to `RECONCILER_IDLE_INTERVAL=15s`, and a 13.2 s p95 is exactly what a 15 s poll looks like.
+The reconciler-only numbers are not a bug: an idle reconciler backs off to `CONDUIT_RECONCILER_IDLE_INTERVAL=15s`, and a 13.2 s p95 is exactly what a 15 s poll looks like.
 Throughput is unaffected either way, because at volume both paths converge on the same worker pool.
 
 One honest gap: Kafka is best-effort at runtime but mandatory at boot.
@@ -178,7 +178,7 @@ It also isn't what makes execution safe: [ADR 0003](docs/decisions/0003-redlock-
 
 ### Crash recovery
 
-20 jobs held in `RUNNING` against a sink that sleeps 8 seconds, `RECONCILER_RUNNING_LEASE=15s`, then `docker compose kill -s KILL app` and an immediate restart.
+20 jobs held in `RUNNING` against a sink that sleeps 8 seconds, `CONDUIT_RECONCILER_RUNNING_LEASE=15s`, then `docker compose kill -s KILL app` and an immediate restart.
 
 | | Run 1 | Run 2 | Run 3 |
 | --- | --- | --- | --- |
@@ -186,7 +186,7 @@ It also isn't what makes execution safe: [ADR 0003](docs/decisions/0003-redlock-
 | All 20 terminal | 936.98 s | 37.91 s | 31.37 s |
 
 Requeue time is bounded below by the lease, which is the design working: nothing can requeue a job until its lease is provably dead, so a 15 s lease costs at least 15 s.
-The default `RECONCILER_RUNNING_LEASE` is 5 minutes, so a real crash recovers in minutes, not seconds.
+The default `CONDUIT_RECONCILER_RUNNING_LEASE` is 5 minutes, so a real crash recovers in minutes, not seconds.
 
 That 936.98 s outlier is not explainable from the code and did not reproduce in two subsequent runs, so it is reported rather than averaged away.
 What the logs *did* explain: after a `SIGKILL`, the dead process's `job:exec:<id>` Redlock keys survive with their full 30 s TTL, so the restarted process burns 300 lock-acquire failures and up to 16 attempts per job churning claim-and-release until they expire.
@@ -244,7 +244,7 @@ I built all three because I wanted to know exactly what each one cost, and now t
 
 **A `NULL` column scanned into a `string` broke every job without an idempotency key, with CI green.** `scanJob` read `idempotency_key` and `lease_token` into `string`, which fails on `NULL`, and every enqueue path in the load test sets an idempotency key. So the test suite and the k6 run both passed while the plain `POST /api/jobs` that the README documents returned a scan error. The fix is four pointers and a nil-to-empty flatten in one place; the lesson is that the happy path in your load generator is not the happy path in your docs.
 
-**The default configuration, not the architecture, caps throughput at 55 jobs/s.** Mean execution time is 5.76 ms, eight workers is theoretically 1,400 jobs/s, and the measured rate was 55. `WORKER_QUEUE_SIZE=256` was the culprit: any burst past the buffer is refused by the pool, drops off the Kafka fast path, and inherits the reconciler's `RECONCILER_BATCH_SIZE=100`-per-tick ceiling. Raising just that one value took it to 195 jobs/s and all three knobs together to 530. I had reasoned about the fast path and the fallback path as alternatives, when in practice the defaults routed nearly all traffic down the slow one.
+**The default configuration, not the architecture, caps throughput at 55 jobs/s.** Mean execution time is 5.76 ms, eight workers is theoretically 1,400 jobs/s, and the measured rate was 55. `CONDUIT_WORKER_QUEUE_SIZE=256` was the culprit: any burst past the buffer is refused by the pool, drops off the Kafka fast path, and inherits the reconciler's `CONDUIT_RECONCILER_BATCH_SIZE=100`-per-tick ceiling. Raising just that one value took it to 195 jobs/s and all three knobs together to 530. I had reasoned about the fast path and the fallback path as alternatives, when in practice the defaults routed nearly all traffic down the slow one.
 
 **A global circuit breaker plus a reconciler that re-claims immediately is a hot loop, not backpressure.** The first attempt at measuring throughput used the no-handler k6 task, which fails every job, which opens the one circuit breaker shared by all task types, which makes `jobWorker` release the claim, which the reconciler re-claims at 100/s, forever. 225,660 jobs `PENDING`, 41 terminal, CPU pinned. Two separate problems, both of which look fine in isolation: the breaker should be per task type, and `releaseClaim` should push `scheduled_at` out rather than making the job immediately eligible again.
 

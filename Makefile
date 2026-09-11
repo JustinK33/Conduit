@@ -1,8 +1,8 @@
 .PHONY: up down restart logs ps test test-race bench vet build tidy enqueue enqueue-elt status list ready worker measure
 
 # Every target below that talks to the API sends this. It is empty by default,
-# which is right for a local stack with API_KEYS unset; export API_KEY (or put
-# it in your shell) once you set API_KEYS on the server, or every call 401s.
+# which is right for a local stack with no keys set; export API_KEY (or put it in
+# your shell) once CONDUIT_API_KEYS is set on the server, or every call 401s.
 AUTH := $(if $(API_KEY),-H "Authorization: Bearer $(API_KEY)",)
 BASE_URL ?= http://localhost:8080
 

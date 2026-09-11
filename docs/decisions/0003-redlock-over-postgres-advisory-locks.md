@@ -12,7 +12,7 @@ Something has to decide which one runs it.
 Postgres could decide. `pg_advisory_xact_lock(hashtext(job_id))` inside the claim transaction is one function call, no new dependency, and it releases automatically when the transaction ends.
 The reason it was not used: an advisory lock held for the duration of a job holds a Postgres connection for the duration of a job.
 A job whose `Task.Timeout` is two minutes would pin a pooled connection for two minutes.
-`WORKER_CONCURRENCY` of 8 across four instances is 32 connections doing nothing but holding locks, and the pool is sized for query traffic, not for that.
+`CONDUIT_WORKER_CONCURRENCY` of 8 across four instances is 32 connections doing nothing but holding locks, and the pool is sized for query traffic, not for that.
 
 Redis was already in the stack, and a lock in Redis costs no Postgres connection.
 
