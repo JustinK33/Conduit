@@ -6,7 +6,13 @@ It replaces the old `IMPROVEMENT_PLAN.md`, whose phases 1 to 3 are largely built
 Phases are ordered by how hard they block adoption, not by how interesting they are.
 Each has a "done when" so it is unambiguous whether it shipped.
 
-## Phase 1 - A pull-based worker API
+## Phase 1 - A pull-based worker API (done)
+
+Shipped. The protocol is [WORKERS.md](WORKERS.md), the reference worker is `loadtest/worker.sh`, and the deployment it assumes is [DEPLOYMENT.md](DEPLOYMENT.md).
+Verified against a live stack with `API_KEYS` set: a job enqueued to queue `remote` was claimed, executed, and completed by a shell script in a separate process; a second one failed with `retry: true`, went back to `PENDING` in one write, and reached `DEAD` when its attempt budget ran out, never appearing in `FAILED`.
+A claim with no key returns 401, a stale token returns 409 on heartbeat, complete, and fail, and `GET /api/jobs/:id` on a RUNNING job carries no lease token.
+
+The original write-up follows, since the reasoning is still what the design is for.
 
 **The problem.** The only way to run your own code is to add an entry to a `map[string]JobHandler` in `cmd/server/main.go` and recompile the binary.
 `docs/decisions/0005-webhook-as-the-execution-model.md` states this as a deliberate limitation, and it is the single fact that disqualifies Conduit for almost everything someone would otherwise reach for Celery or Sidekiq for.

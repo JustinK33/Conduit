@@ -1,9 +1,10 @@
 # Conduit Architecture
 
 Reliable data workflow runtime in Go.
-Jobs come in over HTTP, land in Postgres (durable), get fanned out through Kafka (transport), and are executed by a bounded worker pool.
+Jobs come in over HTTP, land in Postgres (durable), get fanned out through Kafka (transport), and are executed either by the bounded in-process worker pool or by a worker of your own that claims them over HTTP.
 Redis Redlock prevents duplicate execution when multiple instances run against the same topic.
 Built-in handlers include `webhook` delivery and `sql.etl` pipelines for Postgres-backed ELT workflows.
+See [WORKERS.md](WORKERS.md) for the pull protocol and [DEPLOYMENT.md](DEPLOYMENT.md) for what has to sit in front of the server.
 
 ---
 
@@ -71,8 +72,25 @@ Built-in handlers include `webhook` delivery and `sql.etl` pipelines for Postgre
                         │  2. Redlock.Acquire("job:exec:<id>")   │
                         │  3. execute(ctx, job)  ← handler hook  │
                         │  4. RecordSuccess / RecordFailure      │
-                        │  5. UpdateJob → COMPLETED/FAILED/DEAD  │
+                        │  5. JobService.Complete / Fail         │
+                        │     (fenced on lease_token)            │
                         └───────────────────────────────────────┘
+
+Parallel path - a worker of your own:
+
+                        ┌───────────────────────────────────────┐
+                        │        your worker process             │
+                        │      (any language, any host)          │
+                        │                                        │
+                        │  POST /api/jobs/claim  → job + token   │
+                        │  run it wherever you like              │
+                        │  POST /api/jobs/:id/heartbeat          │
+                        │  POST /api/jobs/:id/complete | /fail   │
+                        └───────────────────────────────────────┘
+
+                        Same JobService methods, same two
+                        compare-and-swap statements, same retry
+                        policy as the in-process path above.
 
 Parallel path - Reconciler:
 
@@ -94,13 +112,22 @@ Parallel path - Reconciler:
 ```
   PENDING ──► RUNNING ──► COMPLETED  (terminal)
      ▲            │
-     │            ├──► FAILED ──► PENDING  (retry loop)
-     │            │
-     └────────────┴──► DEAD  (terminal, reachable from any state)
+     └────────────┤  retry: one statement, PENDING with a future scheduled_at
+                  │
+                  └──► DEAD  (terminal, reachable from any state)
 ```
 
 `CanTransition` in `store/store.go` guards every `UpdateJob` call. Illegal
 transitions return `ErrInvalidTransition` - no silent state corruption.
+
+`FAILED` is an unreachable state. Nothing writes it, so `GET /api/jobs?state=FAILED`
+is always empty and a retrying job is `PENDING` with `attempt > 0` and `last_error`
+set. It used to be the midpoint of a two-write retry, `RUNNING -> FAILED -> PENDING`,
+which existed only because `CanTransition` forbids `RUNNING -> PENDING`. A crash in
+that window left a row in `FAILED` holding a live lease token, which nothing
+recovered, because `RequeueExpiredRunning` only scans `RUNNING`. `FailClaimedJob`
+now does the whole move in one statement, with a `CASE` choosing `PENDING` or
+`DEAD`. The enum value is kept for wire compatibility.
 
 ---
 
@@ -112,23 +139,45 @@ blocks on SIGTERM/SIGINT. Implements `jobWorker` (the `worker.JobRunner` that
 runs the circuit breaker / Redlock / execute chain) and `kafkaJobHandler` (the
 consumer bridge that feeds the pool). Drains in-flight work before exit.
 
+Both entry points into the in-process pool respect `WORKER_QUEUES`: the reconciler
+passes it to `ClaimNextJob`, and `kafkaJobHandler` filters on `task.queue` before
+submitting, because the topic carries every job regardless of queue. Without both,
+the server would win jobs meant for a remote worker and dead-letter them for having
+no registered handler. Empty means every queue, which is the right default for a
+single-node install and the wrong one the moment remote workers exist.
+
 ### `internal/etl`
 Built-in SQL ELT task executor.
 The `sql.etl` handler reads a pipeline spec from `task.payload`, validates target identifiers, rejects write-oriented extraction SQL, and executes `INSERT INTO target SELECT ...` against Postgres.
 This turns the queue into a small data workflow runtime for operational analytics.
 
 ### `internal/api`
-Five Gin job endpoints, registered in `RegisterRoutes`:
+Nine Gin job endpoints, registered in `RegisterRoutes`. The whole group sits behind
+`APIKeyAuth(h.APIKeys)`, which is a pass-through when `API_KEYS` is unset.
 
 | Method | Path | Notes |
 |--------|------|-------|
 | `POST` | `/api/jobs` | Requires `task.name`; returns the assigned job ID. Optional `idempotency_key` and `scheduled_at`. |
-| `GET`  | `/api/jobs` | Cursor-paginated list. Query params: `state` (PENDING / RUNNING / COMPLETED / FAILED / DEAD), `limit`, `cursor`. |
+| `GET`  | `/api/jobs` | Cursor-paginated list. Query params: `state` (PENDING / RUNNING / COMPLETED / DEAD), `limit`, `cursor`. |
 | `GET`  | `/api/jobs/by-idempotency-key/:key` | Look up the job a given idempotency key produced. |
-| `GET`  | `/api/jobs/:id` | Reads directly from Postgres. |
+| `GET`  | `/api/jobs/:id` | Reads directly from Postgres. Never includes `lease_token`. |
 | `POST` | `/api/jobs/:id/cancel` | Transitions job to DEAD. |
+| `POST` | `/api/jobs/claim` | Claims the next due job in the named queues. `200` with `{job, lease_token, lease_expires_at}`, or `204` when nothing is due. |
+| `POST` | `/api/jobs/:id/heartbeat` | Extends the lease. Requires the token. |
+| `POST` | `/api/jobs/:id/complete` | Marks COMPLETED and merges `metadata`. Requires the token. |
+| `POST` | `/api/jobs/:id/fail` | Applies the retry policy, or dead-letters when `retry` is false. Requires the token. |
 
-Operational routes live on the root router in `cmd/server/main.go`, outside this group:
+The last four are the pull protocol (`internal/api/worker.go`), documented for
+worker authors in [WORKERS.md](WORKERS.md). Their request bodies are narrow DTOs
+rather than a `models.Job`, deliberately: `UpdateJob` is a full-row overwrite whose
+fencing predicate is disabled by an empty token, so nothing on a client-input path
+is allowed to reach it. All three token-bearing endpoints return `409 lease_lost`
+when the compare-and-swap matches zero rows.
+
+Operational routes live on the root router in `cmd/server/main.go`, outside this
+group and therefore outside auth, so that probes and the Prometheus scrape work
+without a credential. That is why a reverse proxy has to gate them; see
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
 | Method | Path | Notes |
 |--------|------|-------|
@@ -145,11 +194,29 @@ to Postgres first (that's the commit), then publishes to Kafka in a goroutine.
 Kafka being down doesn't fail the caller.
 The job sits PENDING until the reconciler claims it or a reconnected consumer picks it up.
 
+It also owns the outcome of every job, whoever ran it: `Claim`, `Heartbeat`,
+`Complete`, and `Fail` are called by both the HTTP handlers and `jobWorker`. `Fail`
+is where the retry decision lives, which is why it takes an id and a token rather
+than a job: one entry point means the remote path and the in-process path cannot
+drift into two retry policies. It costs one extra `SELECT`, on the failure path
+only. Lease durations requested by a client are clamped to
+`RECONCILER_RUNNING_LEASE`, so a worker cannot park a job for a week.
+
 ### `internal/store`
 `PostgresStore` with a pgx pool. The interesting bit is `ClaimNextJob`:
 `SELECT ... FOR UPDATE SKIP LOCKED` lets multiple instances poll without
 stepping on each other - each grabs a distinct row or moves on immediately.
-No queue manager needed.
+No queue manager needed. It mints the `lease_token` in the same statement that
+flips the row to `RUNNING`, and takes an optional queue filter where empty means
+any queue.
+
+`CompleteClaimedJob` and `FailClaimedJob` are the two writes that end a job. Both
+are single statements fenced on `state = 'RUNNING' AND lease_token = $n`, and both
+return `ErrLeaseLost` when that matches zero rows, which is how a worker learns its
+lease expired and the job now belongs to someone else. `FailClaimedJob` chooses
+`PENDING` with a future `scheduled_at` or `DEAD` on a `CASE` over whether a next-run
+time was passed, so a retry is one round trip and has no intermediate state to crash
+in.
 
 ### `internal/queue`
 Thin Sarama wrapper. Exposes a `Publisher` interface so `JobService` doesn't
@@ -216,6 +283,7 @@ one record each, with the consequences and the costs written out:
 - [0003](decisions/0003-redlock-over-postgres-advisory-locks.md) Redlock over Postgres advisory locks, and why the fencing token matters more.
 - [0004](decisions/0004-leases-and-a-reconciler-instead-of-kafka-redelivery.md) Leases and a reconciler, not Kafka redelivery.
 - [0005](decisions/0005-webhook-as-the-execution-model.md) A webhook is the execution model, so Conduit is not a library.
+- [0006](decisions/0006-a-pull-api-instead-of-a-worker-sdk.md) Workers pull over HTTP rather than importing an SDK, which is what amended 0005.
 
 Two smaller choices that do not warrant their own record:
 
@@ -283,6 +351,10 @@ Endpoints:
 | `GET  localhost:8080/api/jobs/by-idempotency-key/:key` | Look up by idempotency key |
 | `GET  localhost:8080/api/jobs/:id` | Status |
 | `POST localhost:8080/api/jobs/:id/cancel` | Cancel |
+| `POST localhost:8080/api/jobs/claim` | Claim the next due job (`204` when idle) |
+| `POST localhost:8080/api/jobs/:id/heartbeat` | Extend the lease |
+| `POST localhost:8080/api/jobs/:id/complete` | Report success |
+| `POST localhost:8080/api/jobs/:id/fail` | Report failure |
 | `GET  localhost:8080/live` `/ready` `/health` | Probes |
 | `GET  localhost:8080/metrics` | Prometheus |
 | `GET  localhost:9090` | Prometheus UI |
@@ -296,7 +368,7 @@ Endpoints:
 Conduit/
 ├── cmd/server/             # main + jobWorker + kafkaJobHandler
 ├── internal/
-│   ├── api/                # HTTP handlers
+│   ├── api/                # HTTP handlers, pull protocol, API-key auth
 │   ├── circuitbreaker/     # CB state machine
 │   ├── config/             # env-var loading
 │   ├── lock/               # Redlock
@@ -311,7 +383,8 @@ Conduit/
 ├── pkg/models/             # shared types
 ├── migrations/             # SQL
 ├── deploy/
-│   ├── k8s/                # Deployment, Service, HPA, ConfigMap
+│   ├── k8s/                # Deployment, Service, HPA, ConfigMap, Secret template
 │   └── prometheus/
+├── loadtest/               # k6 script, measurement harness, reference worker
 └── .github/workflows/      # CI/CD
 ```

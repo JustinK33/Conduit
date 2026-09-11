@@ -6,7 +6,7 @@ A production-grade **distributed task queue** written in Go - built from scratch
 
 ## What It Does
 
-Conduit is an HTTP-driven job queue service that accepts work from callers, durably persists it in PostgreSQL, publishes it to a Kafka topic, and executes it through a bounded worker pool - all with automatic retries, distributed locking, circuit-breaking, and Prometheus observability.
+Conduit is an HTTP-driven job queue service that accepts work from callers, durably persists it in PostgreSQL, publishes it to a Kafka topic, and executes it either through its own bounded worker pool or through workers you write that claim jobs over HTTP - all with automatic retries, distributed locking, circuit-breaking, and Prometheus observability.
 
 ```
 Client
@@ -15,19 +15,25 @@ Client
 API Handler (Gin)
   │  Enqueue(job)
   ▼
-Job Service ──────────────► Kafka topic "jobs"
+Job Service ──────────────► Kafka topic "conduit.jobs"
   │  CreateJob                   │
-  ▼                              │ Consume
+  ▼                              │ Consume (filtered by queue)
 PostgreSQL                  Worker Pool ──► JobRunner
   │  PENDING → RUNNING               │
-  │  RUNNING → COMPLETED/FAILED      │ Retry Engine
-  ▼  FAILED  → PENDING / DEAD        ▼
+  │  RUNNING → COMPLETED             │ Retry Engine
+  ▼  RUNNING → PENDING / DEAD        ▼
  State Machine               Circuit Breaker
                                     │
  Scheduler ──── cron entries        ▼
  (recurring jobs)           Redis Distributed Lock
                                     │
  Prometheus /metrics         observability
+
+Your worker, anywhere
+  │  POST /api/jobs/claim        → job + lease_token
+  │  run it in your own process
+  ▼  POST /api/jobs/:id/complete | /fail   (token fences the write)
+Job Service - same methods, same retry policy
 ```
 
 ---
@@ -38,7 +44,9 @@ PostgreSQL                  Worker Pool ──► JobRunner
 |---|---|
 | **Async job dispatch** | HTTP POST enqueues a job; returns the ID immediately |
 | **Kafka transport** | Durable publish with per-message headers for tracing |
-| **PostgreSQL state machine** | `PENDING → RUNNING → COMPLETED / FAILED → DEAD` with `FOR UPDATE SKIP LOCKED` claim |
+| **PostgreSQL state machine** | `PENDING → RUNNING → COMPLETED / DEAD` with `FOR UPDATE SKIP LOCKED` claim; a retry is one statement back to `PENDING` |
+| **Worker pull API** | Claim, heartbeat, complete, fail over HTTP, so a worker can be any language on any host. `lease_token` is both the fencing token and the per-claim credential. |
+| **API-key auth** | Bearer tokens on `/api/jobs`, constant-time compared, multiple keys for rotation |
 | **Redlock distributed locking** | Multi-node quorum lock for exclusive resource coordination |
 | **Exponential backoff** | Configurable base, multiplier, cap, and jitter |
 | **Circuit breaker** | Closed / Open / Half-Open state machine protecting downstream calls |
@@ -58,7 +66,7 @@ PostgreSQL                  Worker Pool ──► JobRunner
 ```
 cmd/server/          ← bootstrap, wiring, graceful shutdown
 internal/
-  api/               ← Gin HTTP handler (POST /api/jobs, GET /api/jobs/:id, cancel)
+  api/               ← Gin handlers: enqueue, read, cancel, the worker pull protocol, API-key auth
   config/            ← env-var config loading + validation
   circuitbreaker/    ← Closed / Open / Half-Open state machine
   lock/              ← Redlock algorithm over multiple Redis nodes
@@ -67,11 +75,12 @@ internal/
   queue/             ← Sarama Kafka producer + consumer group
   retry/             ← exponential backoff + jitter engine
   scheduler/         ← cron scheduler with built-in 5-field parser
-  service/           ← Queue adapter: bridges API ↔ Kafka + Postgres
+  service/           ← Queue adapter: bridges API ↔ Kafka + Postgres; owns the retry decision
   store/             ← pgx v5 CRUD + state machine + `FOR UPDATE SKIP LOCKED`
   worker/            ← goroutine pool with semaphore and WaitGroup
 pkg/models/          ← shared domain types (Job, Task, JobState, Config)
 migrations/          ← SQL schema (001_create_jobs.sql)
+loadtest/            ← k6 script, measurement harness, worker.sh reference worker
 deploy/prometheus/   ← prometheus.yml scrape config
 ```
 
@@ -103,13 +112,21 @@ deploy/prometheus/   ← prometheus.yml scrape config
 | `GET` | `/api/jobs/by-idempotency-key/:key` | Fetch the job created for a given idempotency key |
 | `GET` | `/api/jobs/:id` | Fetch job state and timestamps |
 | `POST` | `/api/jobs/:id/cancel` | Cancel a job (transitions to `DEAD`) |
+| `POST` | `/api/jobs/claim` | Claim the next due job; `200` with `{job, lease_token, lease_expires_at}` or `204` when nothing is due |
+| `POST` | `/api/jobs/:id/heartbeat` | Extend the lease on a claimed job; returns `{lease_expires_at}` |
+| `POST` | `/api/jobs/:id/complete` | Report success; merges `metadata` into the job |
+| `POST` | `/api/jobs/:id/fail` | Report failure; returns `{state, attempt, scheduled_at}` |
 | `GET` | `/metrics` | Prometheus scrape endpoint |
 | `GET` | `/live` | Liveness probe (process only) |
 | `GET` | `/ready` | Readiness probe (checks Postgres and Redis) |
 | `GET` | `/health` | Combined health summary |
 
-`state` must be one of `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `DEAD`.
+`state` must be one of `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `DEAD`, though `FAILED` is unreachable: nothing writes it, and a retrying job is `PENDING` with `attempt > 0`.
 The enqueue body accepts `idempotency_key` and `scheduled_at` alongside `task`.
+
+Everything under `/api/jobs` sits behind `API_KEYS` when it is set, as `Authorization: Bearer <key>`.
+The four claim-through-fail endpoints are the worker pull protocol; [docs/WORKERS.md](docs/WORKERS.md) is the contract, including what a worker does when a lease is lost.
+The probe and scrape routes are deliberately outside auth, which is why a deployment needs a proxy to gate them: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ### Example
 
@@ -127,7 +144,20 @@ curl http://localhost:8080/api/jobs/4a7b1c2d-...
 # Cancel
 curl -X POST http://localhost:8080/api/jobs/4a7b1c2d-.../cancel
 # → {"status":"cancelled"}
+
+# Claim as a worker, run it yourself, then report the outcome
+curl -X POST http://localhost:8080/api/jobs/claim \
+  -H 'Content-Type: application/json' \
+  -d '{"queues":["remote"],"lease_seconds":60}'
+# → {"job":{...},"lease_token":"9f2c...","lease_expires_at":"..."}  (or 204)
+
+curl -X POST http://localhost:8080/api/jobs/4a7b1c2d-.../complete \
+  -H 'Content-Type: application/json' \
+  -d '{"lease_token":"9f2c...","metadata":{"worker":"gpu-3"}}'
+# → {"state":"COMPLETED"}
 ```
+
+`loadtest/worker.sh` is the same loop as a runnable script: `make worker queues=remote`.
 
 ---
 
@@ -179,10 +209,13 @@ make down
 |---|---|---|
 | `POSTGRES_DSN` | `postgres://postgres:postgres@localhost:5432/conduit?sslmode=disable` | PostgreSQL connection string |
 | `KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker list |
-| `KAFKA_TOPIC` | `jobs` | Topic for job messages |
-| `REDIS_ADDRESSES` | `localhost:6379` | Comma-separated Redis addresses |
-| `HTTP_ADDRESS` | `:8080` | Server listen address |
-| `WORKER_CONCURRENCY` | `10` | Max parallel job executions |
+| `KAFKA_TOPIC` | `conduit.jobs` | Topic for job messages |
+| `REDIS_ADDRESSES` | `localhost:6379,localhost:6380,localhost:6381` | Comma-separated Redis addresses |
+| `HTTP_ADDRESS` | `:8080` | Server listen address. Set it to `127.0.0.1:8080` behind a local proxy. |
+| `API_KEYS` | empty | Comma-separated bearer tokens for `/api/jobs`, 16 characters minimum. Empty means the API is open. |
+| `TRUSTED_PROXIES` | empty | CIDRs whose `X-Forwarded-For` is believed. Empty trusts nothing and uses the peer address. |
+| `WORKER_QUEUES` | empty | Queues the in-process pool claims from. Empty means all of them, which competes with remote workers. |
+| `WORKER_CONCURRENCY` | `8` | Max parallel job executions |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_PRETTY` | `false` | Human-readable console output |
 
@@ -212,7 +245,7 @@ make bench
 | Test coverage | all packages (`-race` clean) |
 | Infrastructure components | Kafka, PostgreSQL, 3× Redis, Prometheus, Grafana |
 | Kubernetes manifests | Deployment, Service, ConfigMap, HPA |
-| API endpoints | 5 |
+| API endpoints | 9 job routes plus 4 operational |
 | Prometheus metrics | 8 |
 | Cron scheduler | built-in (zero external deps) |
 

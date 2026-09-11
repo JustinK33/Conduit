@@ -1,4 +1,10 @@
-.PHONY: up down restart logs ps test test-race bench vet build tidy enqueue enqueue-elt status list ready measure
+.PHONY: up down restart logs ps test test-race bench vet build tidy enqueue enqueue-elt status list ready worker measure
+
+# Every target below that talks to the API sends this. It is empty by default,
+# which is right for a local stack with API_KEYS unset; export API_KEY (or put
+# it in your shell) once you set API_KEYS on the server, or every call 401s.
+AUTH := $(if $(API_KEY),-H "Authorization: Bearer $(API_KEY)",)
+BASE_URL ?= http://localhost:8080
 
 # Start the full stack (builds the app image, waits for health checks)
 up:
@@ -57,29 +63,33 @@ enqueue:
 		echo "usage: make enqueue url=https://example.com/webhook"; \
 		exit 2; \
 	fi
-	curl -s -X POST http://localhost:8080/api/jobs \
+	curl -s -X POST $(BASE_URL)/api/jobs $(AUTH) \
 		-H "Content-Type: application/json" \
 		-d '{"idempotency_key":"sample-webhook-job","task":{"name":"webhook","payload":"aGVsbG8=","metadata":{"url":"$(url)"}}}' | jq .
 
 # Enqueue a SQL ELT job against the optional demo tables from migrations/002_create_elt_demo.sql
 enqueue-elt:
 	$(eval ELT_PAYLOAD := $(shell base64 < examples/daily_revenue_pipeline.json | tr -d '\n'))
-	curl -s -X POST http://localhost:8080/api/jobs \
+	curl -s -X POST $(BASE_URL)/api/jobs $(AUTH) \
 		-H "Content-Type: application/json" \
 		-d '{"idempotency_key":"sample-sql-elt-daily-revenue","task":{"name":"sql.etl","payload":"$(ELT_PAYLOAD)","max_retries":3,"metadata":{"pipeline":"daily_revenue"}}}' | jq .
 
 # Get job status - usage: make status id=<job-id>
 status:
-	curl -s http://localhost:8080/api/jobs/$(id) | jq .
+	curl -s $(BASE_URL)/api/jobs/$(id) $(AUTH) | jq .
 
-# List jobs - usage: make list, make list state=FAILED
+# List jobs - usage: make list, make list state=DEAD
 list:
 	@if [ -n "$(state)" ]; then \
-		curl -s "http://localhost:8080/api/jobs?state=$(state)&limit=20" | jq .; \
+		curl -s "$(BASE_URL)/api/jobs?state=$(state)&limit=20" $(AUTH) | jq .; \
 	else \
-		curl -s "http://localhost:8080/api/jobs?limit=20" | jq .; \
+		curl -s "$(BASE_URL)/api/jobs?limit=20" $(AUTH) | jq .; \
 	fi
+
+# Run the reference worker against the stack - usage: make worker queues=remote
+worker:
+	QUEUES=$(queues) BASE_URL=$(BASE_URL) API_KEY=$(API_KEY) ./loadtest/worker.sh
 
 # Health probes
 ready:
-	curl -s http://localhost:8080/ready | jq .
+	curl -s $(BASE_URL)/ready | jq .

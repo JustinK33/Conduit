@@ -9,7 +9,10 @@ Postgres is the only place a job's fate is written, and a fencing token bounds t
 ## What it does
 
 You POST a job, Conduit runs it, and it keeps running it across process crashes, broker restarts, and handler failures without anyone watching.
-Two handlers ship with it: `webhook` for outbound HTTP delivery and `sql.etl` for Postgres-to-Postgres pipelines defined in JSON.
+
+Your code runs it one of two ways.
+Either a worker you write in any language claims jobs over HTTP and reports the outcome back, which is the pull API in [docs/WORKERS.md](docs/WORKERS.md), or you use one of the two handlers that ship in-process: `webhook` for outbound HTTP delivery and `sql.etl` for Postgres-to-Postgres pipelines defined in JSON.
+A remote worker gets the same lease, the same fencing token, and the same retry policy as an in-process one, because both paths write through the same code.
 
 The design decision everything else follows from is that Kafka holds no authority.
 A job is durable the moment the Postgres insert commits, and the Kafka publish happens afterwards in a goroutine, so the HTTP response doesn't wait on a broker round trip.
@@ -28,26 +31,32 @@ Every state change goes through `CanTransition` and carries the claim's `lease_t
 ```mermaid
 flowchart TD
     client["HTTP client"] -->|"POST /api/jobs"| api["internal/api<br/>Gin, request id, error envelope"]
-    api --> svc["internal/service<br/>JobService.Enqueue"]
+    api --> svc["internal/service<br/>JobService"]
     svc -->|"CreateJob, PENDING, synchronous"| pg[("Postgres<br/>jobs, source of truth")]
     svc -.->|"Publish to topic jobs, in a goroutine"| kafka["Kafka<br/>transport only"]
-    kafka -->|"consumer group"| pool["internal/worker<br/>semaphore-bounded pool"]
+    kafka -->|"consumer group, filtered by queue"| pool["internal/worker<br/>semaphore-bounded pool"]
     pg -->|"ClaimNextJob, FOR UPDATE SKIP LOCKED"| recon["internal/reconciler<br/>polls, requeues expired leases"]
     recon --> pool
     pool --> jw["jobWorker<br/>breaker, Redlock, lease renewal"]
     jw -->|"SET NX on job:exec:id"| redis[("Redis x3<br/>Redlock quorum")]
     jw -->|"dispatch by task.name"| handlers["internal/webhook<br/>internal/etl"]
-    jw -->|"UpdateJob, guarded by CanTransition"| pg
+    jw -->|"Complete / Fail, fenced on lease_token"| svc
+    remote["your worker<br/>any language, any host"] -->|"POST /api/jobs/claim"| api
+    api -->|"job + lease_token"| remote
+    remote -->|"heartbeat, complete, fail"| api
     jw --> prom["Prometheus /metrics"]
 ```
 
 An enqueue writes the job to Postgres as `PENDING` and returns; the publish to Kafka is fire-and-forget behind it.
-A consumer hands the message to the worker pool, which is bounded by a semaphore and a buffered channel, and `jobWorker` does the four things that have to happen in order: ask the circuit breaker, take the Redlock so two instances consuming the same topic can't run one job twice, execute the registered handler under `Task.Timeout`, then write the result back through the state machine.
-A retryable failure computes a backoff delay, sets `scheduled_at` into the future, walks the job `RUNNING -> FAILED -> PENDING`, and republishes it; an unknown task name returns `ErrNoRetry` and goes straight to `DEAD` rather than looping.
+A consumer hands the message to the worker pool, which is bounded by a semaphore and a buffered channel, and `jobWorker` does the four things that have to happen in order: ask the circuit breaker, take the Redlock so two instances consuming the same topic can't run one job twice, execute the registered handler under `Task.Timeout`, then report the outcome back through `JobService`.
+A remote worker enters at the same place from the other side: it claims a job, which is one `FOR UPDATE SKIP LOCKED` statement that hands back the row and its `lease_token`, and reports the outcome with that token.
+Both paths end in the same two compare-and-swap statements, so a job's fate is written the same way whoever ran it.
+
+A retryable failure computes a backoff delay and moves the job `RUNNING -> PENDING` with a future `scheduled_at` in one statement; an unknown task name goes straight to `DEAD` rather than looping.
 The reconciler runs on its own ticker doing the two jobs Kafka can't: pulling `PENDING` work the broker never delivered, and rescuing `RUNNING` rows whose lease ran out.
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the full diagram, the state machine, and a per-package breakdown.
-[docs/decisions/](docs/decisions/) has the five decisions that shaped it, each with its costs written out.
+[docs/decisions/](docs/decisions/) has the six decisions that shaped it, each with its costs written out.
 
 ## Quick start
 
@@ -61,13 +70,27 @@ That brings up the app, Postgres, Kafka, three Redis nodes, Prometheus, and Graf
 ```bash
 make enqueue url=https://example.com/webhook   # returns a job id
 make status id=<that-id>
-make list state=FAILED
+make list state=DEAD
 make ready                                     # per-dependency readiness
 ```
 
 `/live` always returns 200 and is what the Kubernetes liveness probe uses. `/ready` pings Postgres and the Redis quorum and returns 503 with per-dependency detail, which is what gates traffic.
 
 `make enqueue-elt` runs the SQL pipeline example, and needs the demo tables from `migrations/002_create_elt_demo.sql`.
+
+### Run your own worker
+
+[`loadtest/worker.sh`](loadtest/worker.sh) is a complete worker in about 40 lines of shell.
+Set `WORKER_QUEUES` on the server first, or the server's own pool competes for the jobs your worker is meant to run:
+
+```bash
+make worker queues=remote     # claims, executes, reports; Ctrl-C to stop
+```
+
+[docs/WORKERS.md](docs/WORKERS.md) is the protocol: the four endpoints, the lease contract, and what to do when you lose one.
+
+Set `API_KEYS` in `.env` (`openssl rand -hex 32`) to stop the API being open, then pass the same key to the Make targets as `API_KEY=...`.
+Conduit does not speak TLS, so anything beyond a laptop needs a reverse proxy in front: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ### Measure it
 
@@ -91,10 +114,13 @@ k6, 100 VUs, 10 s ramp / 30 s hold / 10 s ramp-down, `WORKER_CONCURRENCY=8`.
 
 | | |
 | --- | --- |
-| Accepted | 4,864 req/s, 243,271 jobs |
-| API latency | p50 1.39 ms, p95 6.02 ms, p99 12.97 ms |
+| Accepted | 4,684 req/s, 234,279 jobs |
+| API latency | p50 1.49 ms, p95 8.03 ms, p99 18.19 ms |
 | Failed requests | 0 |
-| Peak queue depth | 243,258 `PENDING` |
+| Peak queue depth | 234,263 `PENDING` |
+
+This is a re-measurement after the pull API landed, with `API_KEYS` unset so the auth middleware is the pass-through.
+The previous run was 4,864 req/s at p50 1.39 ms, so the four new endpoints and the queue filter cost nothing outside run-to-run variance.
 
 This measures intake only, and the peak queue depth is the tell: the API accepts jobs about 90x faster than the system executes them.
 The default k6 task name is `k6-load-test`, which has no registered handler, so every one of those jobs is designed to fail on execution.
@@ -107,7 +133,7 @@ Latency is end-to-end wall clock out of Postgres (`updated_at - created_at`), no
 
 | Config | jobs/s | e2e p50 | e2e p99 |
 | --- | --- | --- | --- |
-| Defaults: concurrency 8, queue 256, reconciler batch 100 | 39.6 - 78.7 (4 runs) | 18.5 s | 26.8 s |
+| Defaults: concurrency 8, queue 256, reconciler batch 100 | 39.5 - 78.7 (5 runs) | 18.5 s | 26.8 s |
 | `WORKER_QUEUE_SIZE=4096` | 195.3 | 1.69 s | - |
 | `RECONCILER_BATCH_SIZE=2000` | 133.4 | 0.22 s | 14.0 s |
 | All of the above, concurrency 32 | 530.5 | 1.86 s | 3.10 s |
@@ -118,7 +144,7 @@ They manage 55.
 A burst larger than `WORKER_QUEUE_SIZE=256` gets refused by the pool, falls off the Kafka fast path, and lands on the reconciler, whose `RECONCILER_BATCH_SIZE=100` claims per one-second tick becomes the real ceiling.
 Raising the pool's buffer is the single biggest win because it keeps work on the fast path at all.
 
-Run-to-run variance on the default config is about +/- 40% (39.6, 56.3, 54.0, 78.7 jobs/s), which is why that row is a range.
+Run-to-run variance on the default config is about +/- 40% (39.6, 56.3, 54.0, 78.7, 39.5 jobs/s), which is why that row is a range.
 Anything in this table under a 2x difference is noise.
 
 ### What Kafka buys
@@ -143,8 +169,8 @@ Same 2,000-job drain, three-node Redlock quorum versus a single Redis node.
 
 | Config | jobs/s (per run) |
 | --- | --- |
-| `redis:6379,redis-2:6379,redis-3:6379` | 39.6, 56.3, 54.0, 78.7 |
-| `redis:6379` | 67.7, 54.2, 54.0 |
+| `redis:6379,redis-2:6379,redis-3:6379` | 39.6, 56.3, 54.0, 78.7, 39.5 |
+| `redis:6379` | 67.7, 54.2, 54.0, 65.5 |
 
 No measurable difference, and the ranges overlap completely.
 The quorum is not free (N acquire plus N release round trips per job, roughly 200 ms on the contended path), it is just far cheaper than the dispatch ceiling above it.
@@ -188,15 +214,18 @@ Nothing in Go is the bottleneck here; the network round trips and the dispatch c
 Conduit is not Temporal.
 There is no durable execution, no replay of a function from an event history, no signals or timers or child workflows, and no DAG.
 A job is one call to one handler, and if you need step three to depend on step two you need something else.
-It is not Sidekiq or Asynq either, because a job cannot run in your process: the execution model is an HTTP handler or a `sql.etl` spec, which is a real limitation and the subject of [ADR 0005](docs/decisions/0005-webhook-as-the-execution-model.md).
+It is not Sidekiq or Asynq either.
+Your code can run a job now, but it runs in *your* process behind an HTTP claim, not inside a library you imported: there is no decorator, no autodiscovery, no serialised closure, and no shared type between your worker and the queue.
+[ADR 0006](docs/decisions/0006-a-pull-api-instead-of-a-worker-sdk.md) is why that trade was made, and [ADR 0005](docs/decisions/0005-webhook-as-the-execution-model.md) is what it replaced.
 There is no UI, and there are no dependencies between jobs.
 
 Celery is the closest comparison, and the one worth drawing carefully, because the scope is nearly the same: one task, retries with backoff, delayed execution, a cron ticker, workers fed by a broker.
 Three things differ.
 The broker is not the queue here: in Celery the message *is* the job and the result backend is a side table, so losing RabbitMQ loses queued work, whereas killing Kafka in the measurements above cost 255x on dispatch latency and zero jobs.
 Delivery semantics are not a flag: Celery acks on receipt by default and silently drops a task whose worker dies, `acks_late=True` upgrades that to at-least-once with a visibility timeout, and neither mode has any equivalent of the fencing token, so two Celery workers can both finish the same task and both report success.
-And you cannot define a task, which is the gap that actually disqualifies Conduit for most Celery use cases: `@app.task` on any function is the entire reason people reach for Celery, while Conduit's handler registry is a compile-time map in `cmd/server/main.go` with two entries in it.
-Celery is a library you import. Conduit is a service you point at an endpoint.
+And defining a task costs more here.
+`@app.task` on any function is the entire reason people reach for Celery, and the equivalent in Conduit is a process that polls `POST /api/jobs/claim` and reports back, which is more code than a decorator and buys you a worker that can be written in any language and does not have to trust the queue's runtime.
+Celery is a library you import. Conduit is a service you claim from.
 
 The stack is the honest problem.
 Measured against its own numbers, Postgres alone with `FOR UPDATE SKIP LOCKED` would serve this entire design: it is the source of truth, the claim mechanism, the scheduler, and the recovery path already.
@@ -221,11 +250,15 @@ I built all three because I wanted to know exactly what each one cost, and now t
 
 **A retry engine nobody calls still passes its unit tests.** `internal/retry` computed exponential backoff correctly and had tests to prove it, and the worker never applied the result. Jobs entered `FAILED` and stopped there permanently. In the same pass I found `Attempt` was never incremented, the `PENDING -> RUNNING` transition wasn't happening at all, and `Task.Timeout` was parsed but never turned into a `context.WithTimeout`, so a hung handler hung forever. Every one of those is a component that worked in isolation and was not wired to anything. Testing the retry engine was never the same thing as testing that jobs retry.
 
+**Deleting a state was the bug fix.** Retrying a job used to be two writes, `RUNNING -> FAILED` then `FAILED -> PENDING`, because `CanTransition` forbids `RUNNING -> PENDING` directly. A crash between them left a row in `FAILED` holding a live `lease_token`, and `RequeueExpiredRunning` only ever scans `RUNNING`, so that job was unrecoverable by any mechanism in the system. The fix was one statement that goes `RUNNING -> PENDING(scheduled_at)` or `RUNNING -> DEAD` on a `CASE`, which makes `FAILED` unreachable: nothing writes it now, and a retrying job is `PENDING` with `attempt > 0` and `last_error` set. The state was only ever observable for the milliseconds between two writes, and that window existing at all was the whole defect. The enum value stays for wire compatibility.
+
+**A column nothing reads is not a routing key.** `task_queue` had existed since the first migration, defaulted to `'default'`, and appeared in zero `WHERE` clauses, so nothing noticed that `CreateJob` always wrote the field explicitly and a job enqueued without a queue landed as `''` rather than `'default'`. The moment claims started filtering on it, that was a routing bug: a worker claiming `default` could not see those rows. The same latent gap ran deeper - the Kafka consumer submitted every message to the local pool regardless of queue, so the server would have eaten a remote worker's jobs and dead-lettered them for having no handler, and the filter on the reconciler alone would not have caught it. A default that only exists in the schema is not a default.
+
 **Adding jitter to a capped backoff uncaps it.** The engine clamped the delay to `MaxDelay` and then added a random jitter on top, which is the natural order to write and puts the result above the cap. It needs clamping again after the jitter. A backoff ceiling that the jitter can exceed is not a ceiling, and the test that would have caught it had to assert on the maximum over many runs rather than on one.
 
 **A distributed lock is not a fencing token.** Redlock stops two workers starting the same job at once, and does nothing about a worker whose lease expired mid-execution writing `COMPLETED` over a job the reconciler already requeued and handed to someone else. That needed `lease_token` in the `UPDATE ... WHERE` clause so the stale write matches zero rows and returns `ErrInvalidTransition`. Everything the README claims about at-least-once rests on that one predicate, not on the three Redis nodes.
 
-**Moving work off the hot path is worth measuring, and worth admitting the shortcut in.** The Kafka publish used to sit inline in `Enqueue`, so every HTTP request waited on a broker round trip. Firing it in a goroutine after the Postgres commit is what gets the 1.39 ms p50 and 4,864 req/s in the intake table above. The honest version of that story is that `go func()` around a `SyncProducer` is not what you'd ship at scale: it is one unbounded goroutine per enqueue, and Sarama's `AsyncProducer` is the real answer, which in turn requires draining an error channel in a background loop or you leak. I took the simpler one deliberately, and the reconciler is what makes it safe rather than lucky.
+**Moving work off the hot path is worth measuring, and worth admitting the shortcut in.** The Kafka publish used to sit inline in `Enqueue`, so every HTTP request waited on a broker round trip. Firing it in a goroutine after the Postgres commit is what gets the 1.49 ms p50 and 4,684 req/s in the intake table above. The honest version of that story is that `go func()` around a `SyncProducer` is not what you'd ship at scale: it is one unbounded goroutine per enqueue, and Sarama's `AsyncProducer` is the real answer, which in turn requires draining an error channel in a background loop or you leak. I took the simpler one deliberately, and the reconciler is what makes it safe rather than lucky.
 
 **A benchmark with no entry point can be broken for months.** Five `_bench_test.go` files existed and the Makefile had no target that ran them, so nothing did. When I added `make bench` it hung. `BenchmarkBreakerRecordSuccess` rebuilt the circuit breaker inside the loop behind `StopTimer`/`StartTimer`, which meant the measured time per iteration barely grew, so Go kept raising `b.N` looking for a stable measurement and never found one. `make bench` finishes in about 55 seconds now. Unrunnable code rots exactly as fast as unwritten code, and looks better on a file listing.
 
@@ -239,10 +272,12 @@ I built all three because I wanted to know exactly what each one cost, and now t
 
 - [docs/decisions/](docs/decisions/) is six decision records with a column for the uncomfortable part of each: Postgres as the source of truth, Kafka as transport only, Redlock over advisory locks, leases instead of Kafka redelivery, the webhook execution model, and workers pulling over HTTP instead of importing an SDK.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the reference: system diagram, job state machine, and a package-by-package breakdown.
+- [docs/WORKERS.md](docs/WORKERS.md) is how you write a worker: the four endpoints, the lease and heartbeat contract, what to do when you lose a lease, and the two wire-format quirks a non-Go client hits.
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is the reverse proxy recipe, in Caddy and nginx, and why one is not optional: Conduit has no TLS and four endpoints that are deliberately unauthenticated.
 - [PROJECT.md](PROJECT.md) has the API surface with curl examples and response shapes, plus the config table.
 - [docs/FEATURES.md](docs/FEATURES.md) goes deep on four pieces: the async publish and its tradeoff, Redlock, the Kubernetes manifests, and the CI/CD pipeline.
 - [docs/use-cases/sql-elt.md](docs/use-cases/sql-elt.md) walks a real pipeline config, with [examples/daily_revenue_pipeline.json](examples/daily_revenue_pipeline.json) as the input.
-- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it, starting with the fact that you cannot yet run your own code on it.
+- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API above; next is not needing Kafka and Redis to run it at all.
 - [migrations/](migrations/) is the schema, applied by Postgres on first boot.
 
 ## Tech stack
