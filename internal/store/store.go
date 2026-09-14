@@ -87,10 +87,10 @@ func (s *PostgresStore) CreateJob(ctx context.Context, job models.Job) error {
 		nullableString(job.IdempotencyKey),
 		job.Task.ID,
 		job.Task.Name,
-		job.Task.Payload,
+		[]byte(job.Task.Payload),
 		job.Task.RetryCount,
 		job.Task.MaxRetries,
-		job.Task.Timeout.Nanoseconds(),
+		time.Duration(job.Task.Timeout).Nanoseconds(),
 		job.Task.CronExpression,
 		job.Task.Queue,
 		taskMetaBytes,
@@ -545,7 +545,10 @@ func scanJob(ctx context.Context, row pgx.Row) (models.Job, error) {
 		taskMetaJSON []byte
 		metaJSON     []byte
 		timeoutNS    int64
-		state        string
+		// payload is scanned as a plain []byte and converted after: pgx maps
+		// BYTEA to []byte, not to a named slice type over it.
+		payload []byte
+		state   string
 		// idempotency_key and lease_token are written with nullableString, so
 		// they arrive as NULL for any job without a key or an active lease.
 		// Scanning those straight into a string fails with "cannot scan NULL
@@ -559,7 +562,7 @@ func scanJob(ctx context.Context, row pgx.Row) (models.Job, error) {
 		&idempotencyKey,
 		&job.Task.ID,
 		&job.Task.Name,
-		&job.Task.Payload,
+		&payload,
 		&job.Task.RetryCount,
 		&job.Task.MaxRetries,
 		&timeoutNS,
@@ -589,7 +592,8 @@ func scanJob(ctx context.Context, row pgx.Row) (models.Job, error) {
 		job.LeaseToken = *leaseToken
 	}
 	job.State = models.JobState(state)
-	job.Task.Timeout = time.Duration(timeoutNS)
+	job.Task.Timeout = models.Duration(timeoutNS)
+	job.Task.Payload = payload
 
 	if len(taskMetaJSON) > 0 {
 		if err := json.Unmarshal(taskMetaJSON, &job.Task.Metadata); err != nil {

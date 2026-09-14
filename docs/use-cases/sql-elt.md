@@ -18,7 +18,7 @@ Those mechanics include idempotent enqueue, durable job state, `FOR UPDATE SKIP 
 ## Task Contract
 
 Submit a job with `task.name` set to `sql.etl`.
-Encode the pipeline spec JSON as base64 in `task.payload`, because `payload` is a byte array in the public API.
+Put the pipeline spec straight into `task.payload`, which carries JSON inline.
 The pipeline spec must contain `extract_sql`, `target_table`, and `target_columns`.
 The optional `write_mode` can be `append` or `upsert`.
 When `write_mode` is `upsert`, `conflict_columns` must name the target key columns.

@@ -144,7 +144,7 @@ type requestBody struct {
 	TaskID   string            `json:"task_id,omitempty"`
 	TaskName string            `json:"task_name"`
 	Attempt  int               `json:"attempt"`
-	Payload  []byte            `json:"payload,omitempty"`
+	Payload  models.Payload    `json:"payload,omitempty"`
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 

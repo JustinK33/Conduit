@@ -37,6 +37,45 @@ func TestHandlerSuccess(t *testing.T) {
 	}
 }
 
+// TestHandlerSendsPayloadInline pins the outbound half of the v0.2.0 wire
+// change. Until then requestBody.Payload was a []byte, so a receiver got
+// "payload":"eyJvcmRlcl9pZCI6MTIzNH0=" and had to base64-decode it. This is the
+// change most likely to break a receiver that already exists, so it gets a test
+// that looks at the actual bytes on the wire rather than at the struct.
+func TestHandlerSendsPayloadInline(t *testing.T) {
+	var gotBody []byte
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		return response(http.StatusNoContent, ""), nil
+	})}
+
+	executor := newTestExecutor(client)
+	err := executor.Handler(context.Background(), models.Job{
+		ID:      "job-1",
+		Attempt: 2,
+		Task: models.Task{
+			Name:     TaskName(),
+			Payload:  models.Payload(`{"order_id":1234}`),
+			Metadata: map[string]string{"url": "https://example.com/webhook"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := `{"job_id":"job-1","task_name":"webhook","attempt":2,"payload":{"order_id":1234}}`
+	if string(gotBody) != want {
+		t.Errorf("outbound body =\n  %s\nwant\n  %s", gotBody, want)
+	}
+	if strings.Contains(string(gotBody), "eyJ") {
+		t.Errorf("payload looks base64-encoded: %s", gotBody)
+	}
+}
+
 func TestHandlerUsesConfiguredMethod(t *testing.T) {
 	var gotMethod string
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

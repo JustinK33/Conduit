@@ -87,7 +87,7 @@ docker run -d --name conduit --network conduit -p 8080:8080 \
 
 ```bash
 curl -X POST localhost:8080/api/jobs -H 'content-type: application/json' \
-  -d '{"task":{"queue":"default","name":"webhook","metadata":{"url":"https://your-endpoint.example/hook","method":"POST"},"timeout":15000000000}}'
+  -d '{"task":{"queue":"default","name":"webhook","metadata":{"url":"https://your-endpoint.example/hook","method":"POST"},"timeout":"15s"}}'
 ```
 
 `amd64` and `arm64` images are published, so that runs natively on an Apple Silicon or Graviton machine rather than under emulation.

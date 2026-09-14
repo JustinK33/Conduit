@@ -11,6 +11,7 @@ Each one states the context, the decision, and the consequences, including the o
 | [0004](0004-leases-and-a-reconciler-instead-of-kafka-redelivery.md) | Leases and a reconciler, not Kafka redelivery | Crash recovery is bounded below by the lease duration, five minutes by default |
 | [0005](0005-webhook-as-the-execution-model.md) | A webhook is the execution model | Amended by 0006. It made a job unable to run in your process at all, which disqualified Conduit for most of what a queue is for |
 | [0006](0006-a-pull-api-instead-of-a-worker-sdk.md) | Workers pull over HTTP instead of importing an SDK | One shared API key with no per-worker identity, and a claimed job that vanishes costs a full lease before anyone notices |
+| [0007](0007-a-strict-wire-contract.md) | Unknown fields are an error, and `timeout` and `payload` stop leaking Go types | Every v0.1.0 client breaks, and so does every endpoint already receiving Conduit webhooks, on the receiver's side rather than ours |
 
 New records: copy the format, take the next number, and be specific about what the decision costs.
 A record that only lists benefits is not finished.

@@ -11,6 +11,7 @@ import (
 	"github.com/JustinK33/Conduit/internal/store"
 	"github.com/JustinK33/Conduit/pkg/models"
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/rs/zerolog"
 )
 
@@ -46,6 +47,13 @@ func NewHandler(queue Queue, jobs store.JobStore, logger zerolog.Logger, reg *me
 }
 
 func (h *Handler) RegisterRoutes(router gin.IRouter) {
+	// A field Conduit does not recognise is a client bug, not something to
+	// discard. A top-level "queue" instead of task.queue silently mis-routed
+	// every job that copied the README, and looked identical to success.
+	// The flag is package-level in gin, so this covers all five bind sites.
+	// It does not descend into map[string]string, so metadata stays free-form.
+	binding.EnableDecoderDisallowUnknownFields = true
+
 	router.Use(RequestID(h.Logger), RequestLogger(), Recovery(), h.metricsMiddleware())
 	// Auth mounts on the group, not the router: cmd/server registers /metrics,
 	// /live, /ready, and /health on the root and those must stay reachable.

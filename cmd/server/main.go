@@ -554,9 +554,9 @@ func (jw *jobWorker) execute(ctx context.Context, job models.Job) error {
 		return fmt.Errorf("worker: no handler registered for task %q: %w", job.Task.Name, retry.ErrNoRetry)
 	}
 
-	if job.Task.Timeout > 0 {
+	if timeout := time.Duration(job.Task.Timeout); timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, job.Task.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 	return handler(ctx, job)

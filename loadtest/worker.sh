@@ -64,8 +64,8 @@ while true; do
   job_id=$(jq -r '.job.id' <<<"$body")
   task_name=$(jq -r '.job.task.name' <<<"$body")
   lease_token=$(jq -r '.lease_token' <<<"$body")
-  # Payload is base64 on the wire because Task.Payload is a Go []byte.
-  payload=$(jq -r '.job.task.payload // "" | @base64d' <<<"$body")
+  # Payload is inline JSON, so -c prints it as-is with no decoding step.
+  payload=$(jq -c '.job.task.payload // ""' <<<"$body")
 
   echo "worker: claimed $job_id ($task_name)"
 

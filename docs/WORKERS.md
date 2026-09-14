@@ -49,10 +49,10 @@ Trust `lease_expires_at` in the response, not the number you asked for.
     "task": {
       "id": "",
       "name": "render.thumbnail",
-      "payload": "eyJ1cmwiOiJodHRwczovLy4uLiJ9",
+      "payload": {"url": "https://..."},
       "retry_count": 0,
       "max_retries": 3,
-      "timeout": 30000000000,
+      "timeout": "30s",
       "queue": "render"
     },
     "metadata": {"source": "api"},
@@ -186,25 +186,33 @@ Two things to know before you point a worker at anything but localhost:
 
 ## Wire format, for a client that is not Go
 
-Two fields serialise the way Go serialises them rather than the way you would design them.
-Both are fixed in the same breaking change as the rest of the wire format, so they are documented rather than papered over.
+**Unknown fields are rejected.**
+A body carrying a field Conduit does not define returns 400 naming that field, rather than 201 with the field discarded.
+That covers a misspelling, a field from a newer version of this document, and the specific mistake of putting `queue` at the top level instead of inside `task`.
+It applies to every endpoint here.
 
-**`task.payload` is base64.**
-It is a `[]byte` on the server, so `encoding/json` base64-encodes it.
-Decode it before you look at it, and encode when you enqueue.
+`metadata` is the exception, on purpose: its keys are your vocabulary, not Conduit's, so anything goes inside it.
+
+**`task.payload` is whatever JSON you put there, carried inline.**
+Conduit stores it byte for byte and does not interpret it.
+An object, an array, a string, a number, all fine.
 It is absent entirely when empty.
 
 ```
-jq -r '.job.task.payload // "" | @base64d'    # shell
-base64.b64decode(job["task"]["payload"])       # python
+jq -c '.job.task.payload'     # shell
+job["task"]["payload"]        # python, already parsed
 ```
 
-**`task.timeout` is an integer count of nanoseconds.**
-`30000000000` is 30 seconds.
+**`task.timeout` is a duration string.**
+`"30s"`, `"1m30s"`, `"2h"`, using [Go's duration syntax](https://pkg.go.dev/time#ParseDuration).
+A bare number is a 400, since `15` could plausibly mean seconds or nanoseconds and guessing wrong is a factor of a billion.
 It is advisory for a remote worker: nothing enforces it on your side, so honour it if you want the timeout the enqueuer asked for.
 
 Times are RFC 3339 in UTC.
 `attempt` counts claims, not failures, and increments on every claim including one that follows a lease expiry.
+
+Both fields looked different before v0.2.0: `payload` was base64 and `timeout` was an integer count of nanoseconds.
+A client written against v0.1.0 gets a 400 rather than a silent misread.
 
 ## Status codes
 

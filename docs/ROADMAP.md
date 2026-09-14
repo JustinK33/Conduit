@@ -139,6 +139,34 @@ The original write-up follows, since the reasoning is still what the design is f
 
 **Done when** the install instructions are a version number and not a git clone.
 
+## Phase 7 - A wire contract worth committing to (done)
+
+Shipped in v0.2.0, and it is a breaking change.
+The reasoning is in [0007-a-strict-wire-contract.md](decisions/0007-a-strict-wire-contract.md).
+
+**The problem.** Commit `dc0844a` fixed a `queue` field sitting at the wrong nesting level in the README quickstart.
+The fix was one line.
+The reason it survived to reach the most-copied command in the project is that `EnqueueRequest` has no top-level `queue` field and gin discarded fields it did not recognise, so a mis-routed job returned 201 and looked exactly like a correctly routed one.
+
+Two more fields serialised the way Go serialises them rather than the way anyone would design them, and `WORKERS.md` had a section apologising for both.
+
+**The change.** Three things, all in the request and response shape:
+
+- Unknown fields return 400 naming the field. `binding.EnableDecoderDisallowUnknownFields` is package-level in gin, so one line in `RegisterRoutes` covers the enqueue handler and all four pull-protocol handlers. It does not descend into `map[string]string`, so `metadata` stays free-form, which is the right split: metadata keys are the caller's vocabulary, Conduit's field names are not.
+- `task.timeout` is a duration string. `"15s"` rather than `15000000000`. A bare number is rejected rather than guessed at, because `15` could plausibly mean either unit and the two differ by a factor of a billion.
+- `task.payload` is inline JSON rather than base64, in both the enqueue body and the webhook executor's outbound envelope, so the field means one thing in both directions.
+
+Neither field changed on disk.
+`task_timeout_ns` is still `BIGINT` and `task_payload` is still `BYTEA`; this was a serialisation fix, so there is no migration.
+
+Two things worth recording because they were not obvious going in.
+
+**`json.RawMessage` is the wrong type for `payload`.** It is the stdlib answer and it marshals its bytes verbatim, so a row written before v0.2.0 holding non-JSON bytes would turn `GET /api/jobs/:id` into a 500. `models.Payload` falls back to base64 when `json.Valid` says no, which keeps old rows readable instead of poisoning a response body.
+
+**Two tests were built on the behaviour being removed.** `TestEnqueueJobIgnoresServerOwnedFields` asserted that a caller-supplied `id`, `state`, and `attempt` were silently dropped, which was its entire premise. It is now `TestEnqueueJobRejectsUnknownFields`, one case per field, and the guarantee is stronger: the caller finds out. That a passing test had to be inverted is the clearest evidence the old behaviour was a decision nobody had made deliberately.
+
+**Done when** the pre-`dc0844a` body returns 400 naming `queue` instead of 201, and no command in the repo pipes anything through `base64` to enqueue a job.
+
 ## Documentation hygiene
 
 Tracked here because it keeps recurring, not because it is a phase.

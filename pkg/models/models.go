@@ -1,6 +1,11 @@
 package models
 
-import "time"
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // JobState is the durable lifecycle stage of a queued task.
 type JobState string
@@ -13,15 +18,64 @@ const (
 	JobStateDead      JobState = "DEAD"
 )
 
+// Duration is a time.Duration that crosses the wire as "15s" rather than as
+// 15000000000. time.Duration's own JSON form is integer nanoseconds, which is
+// unreadable in a curl command and easy to get wrong by three orders of
+// magnitude.
+type Duration time.Duration
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+// UnmarshalJSON accepts a duration string only. The integer-nanosecond form
+// that Conduit accepted before v0.2.0 is rejected rather than guessed at: a
+// caller who means 15 seconds and writes 15 should hear about it.
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("timeout must be a duration string like \"15s\", got %s", b)
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("timeout %q: %w", s, err)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+// Payload is the caller's task body, carried inline as JSON rather than
+// base64. Conduit does not interpret it, so any valid JSON value is accepted
+// and stored byte for byte.
+type Payload []byte
+
+func (p Payload) MarshalJSON() ([]byte, error) {
+	if len(p) == 0 {
+		return []byte("null"), nil
+	}
+	if json.Valid(p) {
+		return p, nil
+	}
+	// ponytail: task_payload is BYTEA and held arbitrary bytes before v0.2.0,
+	// so returning those verbatim would put invalid JSON in a response body.
+	// Base64 keeps them readable. Drop this branch once no such row survives.
+	return json.Marshal(base64.StdEncoding.EncodeToString(p))
+}
+
+func (p *Payload) UnmarshalJSON(b []byte) error {
+	*p = append((*p)[:0], b...)
+	return nil
+}
+
 // Task describes the payload and execution metadata for a job.
 type Task struct {
-	ID             string        `json:"id"`
-	Name           string        `json:"name"`
-	Payload        []byte        `json:"payload,omitempty"`
-	RetryCount     int           `json:"retry_count"`
-	MaxRetries     int           `json:"max_retries"`
-	Timeout        time.Duration `json:"timeout"`
-	CronExpression string        `json:"cron_expression,omitempty"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Payload        Payload  `json:"payload,omitempty"`
+	RetryCount     int      `json:"retry_count"`
+	MaxRetries     int      `json:"max_retries"`
+	Timeout        Duration `json:"timeout"`
+	CronExpression string   `json:"cron_expression,omitempty"`
 	// Queue is the routing key: a worker claims from the queues it names, so a
 	// remote worker never wins a job it has no code for. Empty is normalised to
 	// DefaultQueue on enqueue.
