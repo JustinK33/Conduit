@@ -72,7 +72,21 @@ func Default() models.Config {
 			Enabled:      true,
 			Interval:     time.Second,
 			IdleInterval: 15 * time.Second,
-			BatchSize:    100,
+			// BatchSize is the one knob that moves drain throughput on the default
+			// transport, where the reconciler is the only claim path there is:
+			// CONDUIT_WORKER_QUEUE_SIZE and CONDUIT_WORKER_CONCURRENCY measured as
+			// noise, alone and together. It is a per-tick claim budget rather than a
+			// buffer, and ClaimNextJob is submitted with SubmitBlocking, so the loop
+			// stops on a full pool by itself and a larger budget costs no memory.
+			//
+			// 500 over 100 is a tail-latency argument more than a throughput one: in
+			// six back-to-back pairs the throughput margins were mostly inside the
+			// noise band, but the worst e2e p95 was 4.45s at 100 against 1.68s at
+			// 500. A 2,000-job burst needs twenty ticks at 100 per second.
+			// The sweep flattens by 250 and 500 to 2000 are indistinguishable, so
+			// this is the low end of the plateau: past the knee, and short enough
+			// that a claim loop does not delay the next RequeueExpiredRunning pass.
+			BatchSize:    500,
 			RunningLease: 5 * time.Minute,
 		},
 		Metrics: models.MetricsConfig{

@@ -196,12 +196,13 @@ func run(ctx context.Context) error {
 		publisher = queue.NewPostgresNotifier(pgPool)
 	}
 
-	breaker := circuitbreaker.New(circuitbreaker.Config{
+	breakerCfg := circuitbreaker.Config{
 		FailureThreshold: 5,
 		SuccessThreshold: 2,
 		OpenTimeout:      30 * time.Second,
 		HalfOpenRequests: 1,
-	})
+	}
+	handlers := defaultHandlers(cfg.Webhook, pgPool)
 
 	retryEngine := retry.NewEngine(retry.Config{
 		BaseDelay:   time.Second,
@@ -218,10 +219,10 @@ func run(ctx context.Context) error {
 		store:    jobStore,
 		outcome:  jobSvc,
 		lockMgr:  lockMgr,
-		breaker:  breaker,
+		breakers: newTaskBreakers(breakerCfg, handlers),
 		metrics:  reg,
 		log:      logger.WithComponent(log, "worker"),
-		handlers: defaultHandlers(cfg.Webhook, pgPool),
+		handlers: handlers,
 		lease:    cfg.Reconciler.RunningLease,
 	}
 	workerPool := worker.NewPool(worker.Config{
@@ -392,12 +393,58 @@ type jobWorker struct {
 	store    store.JobStore
 	outcome  jobOutcome
 	lockMgr  jobLocker
-	breaker  *circuitbreaker.Breaker
+	breakers *taskBreakers
 	metrics  *metrics.Registry
 	log      zerolog.Logger
 	handlers map[string]TaskHandler
 	lease    time.Duration
 }
+
+// taskBreakers holds one circuit breaker per registered task name. There used to
+// be a single process-global breaker, which meant one unreachable webhook
+// endpoint opened the circuit for sql.etl and for every other task at once: five
+// failures anywhere stopped everything for the open timeout.
+//
+// The map is built once from the handler table, which is fixed at startup, so
+// there is nothing to lock and nothing that grows. Keying a lazily-populated map
+// on job.Task.Name would be the obvious alternative and is worse, because task
+// names come from callers and an unbounded map keyed on caller input is a way to
+// spend memory on a typo.
+type taskBreakers struct {
+	byTask map[string]*circuitbreaker.Breaker
+	// unregistered names share one breaker. They fail on every attempt, since
+	// execute has no handler for them and returns ErrNoRetry, and there is no
+	// endpoint behind them whose health is worth tracking separately.
+	unknown *circuitbreaker.Breaker
+	// openTimeout is how long a release-on-open should defer the job for. Kept
+	// here so it cannot drift from the value the breakers were built with.
+	openTimeout time.Duration
+}
+
+func newTaskBreakers(cfg circuitbreaker.Config, handlers map[string]TaskHandler) *taskBreakers {
+	byTask := make(map[string]*circuitbreaker.Breaker, len(handlers))
+	for name := range handlers {
+		byTask[name] = circuitbreaker.New(cfg)
+	}
+	return &taskBreakers{
+		byTask:      byTask,
+		unknown:     circuitbreaker.New(cfg),
+		openTimeout: cfg.OpenTimeout,
+	}
+}
+
+func (b *taskBreakers) get(taskName string) *circuitbreaker.Breaker {
+	if breaker, ok := b.byTask[taskName]; ok {
+		return breaker
+	}
+	return b.unknown
+}
+
+// lockContentionBackoff defers a job whose execution lock is held elsewhere.
+// Short, because the other holder is running the job right now: by the time this
+// elapses the job is either terminal or the lock is free. Non-zero all the same,
+// so two instances cannot trade the same job back and forth at reconciler speed.
+const lockContentionBackoff = 5 * time.Second
 
 // maxInWorkerSleep caps how long a worker will block waiting for scheduled_at.
 // Longer waits are left in Postgres for the reconciler instead of holding a slot.
@@ -419,9 +466,14 @@ func (jw *jobWorker) Run(ctx context.Context, job models.Job) error {
 		}
 	}
 
-	if !jw.breaker.Allow() {
-		jw.log.Warn().Str("job_id", job.ID).Msg("circuit open, skipping execution")
-		jw.releaseClaim(ctx, job, "circuit open")
+	breaker := jw.breakers.get(job.Task.Name)
+	if !breaker.Allow() {
+		// Wait out the open timeout before this job is eligible again. Releasing
+		// with no delay put it back in front of the reconciler on the next tick,
+		// which re-claimed it, which released it, for as long as the circuit
+		// stayed open.
+		jw.log.Warn().Str("job_id", job.ID).Str("task", job.Task.Name).Msg("circuit open, skipping execution")
+		jw.releaseClaim(ctx, job, "circuit open", jw.breakers.openTimeout)
 		return nil
 	}
 
@@ -430,7 +482,10 @@ func (jw *jobWorker) Run(ctx context.Context, job models.Job) error {
 	lck, err := jw.lockMgr.Acquire(ctx, "job:exec:"+job.ID)
 	if err != nil {
 		jw.log.Warn().Err(err).Str("job_id", job.ID).Msg("could not acquire execution lock")
-		jw.releaseClaim(ctx, job, "could not acquire execution lock")
+		// Another instance holds the lock, so it is executing this job right now.
+		// Short delay: by the time it clears, the job is either terminal or the
+		// lock is free.
+		jw.releaseClaim(ctx, job, "could not acquire execution lock", lockContentionBackoff)
 		return nil
 	}
 	defer jw.lockMgr.Release(ctx, lck) //nolint:errcheck
@@ -468,7 +523,7 @@ func (jw *jobWorker) Run(ctx context.Context, job models.Job) error {
 	defer stopRenewLease()
 
 	if runErr := jw.execute(ctx, job); runErr != nil {
-		jw.breaker.RecordFailure()
+		breaker.RecordFailure()
 		jw.metrics.JobFailed.Inc()
 
 		// The retry policy lives in the service layer so that this path and the
@@ -482,7 +537,7 @@ func (jw *jobWorker) Run(ctx context.Context, job models.Job) error {
 		return runErr
 	}
 
-	jw.breaker.RecordSuccess()
+	breaker.RecordSuccess()
 	jw.metrics.JobCompleted.Inc()
 
 	if err := jw.outcome.Complete(ctx, job.ID, job.LeaseToken, nil); err != nil {
@@ -536,11 +591,11 @@ func (jw *jobWorker) effectiveLease() time.Duration {
 	return 5 * time.Minute
 }
 
-func (jw *jobWorker) releaseClaim(ctx context.Context, job models.Job, reason string) {
+func (jw *jobWorker) releaseClaim(ctx context.Context, job models.Job, reason string, retryAfter time.Duration) {
 	if job.State != models.JobStateRunning || job.LeaseToken == "" {
 		return
 	}
-	if err := jw.store.ReleaseClaim(ctx, job, reason); err != nil {
+	if err := jw.store.ReleaseClaim(ctx, job, reason, retryAfter); err != nil {
 		jw.log.Warn().Err(err).Str("job_id", job.ID).Msg("failed to release claimed job")
 	}
 }

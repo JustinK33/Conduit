@@ -502,3 +502,72 @@ func TestFailClaimedJob(t *testing.T) {
 		})
 	}
 }
+
+// A released job keeps its attempt and its PENDING state either way, so
+// scheduled_at is the only column that separates a correct release from the
+// claim-release loop: with it untouched the reconciler re-claims the job on its
+// very next tick, and a caller that keeps refusing spins as fast as it can poll.
+func TestReleaseClaimDefersTheJob(t *testing.T) {
+	dsn := os.Getenv("POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set POSTGRES_TEST_DSN to run")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	// Claims here are unfiltered, so they take the oldest due row in the table:
+	// its own table is what stops a live stack's reconciler from claiming this
+	// job first. See TestClaimNextJobQueueFilter.
+	s := NewPostgresStore(pool, claimTestTable(ctx, t, pool))
+	now := time.Now().UTC()
+	id := "test-release-" + time.Now().UTC().Format("20060102150405.000000000")
+
+	if err := s.CreateJob(ctx, models.Job{
+		ID:          id,
+		Task:        models.Task{ID: id, Name: "webhook", Queue: "default"},
+		State:       models.JobStatePending,
+		ScheduledAt: &now,
+		CreatedAt:   now,
+	}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	job, err := s.ClaimNextJob(ctx, time.Minute, nil)
+	if err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+
+	const retryAfter = 30 * time.Second
+	released := time.Now().UTC()
+	if err := s.ReleaseClaim(ctx, job, "circuit open", retryAfter); err != nil {
+		t.Fatalf("ReleaseClaim: %v", err)
+	}
+
+	got, err := s.GetJob(ctx, id)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.State != models.JobStatePending {
+		t.Errorf("state = %s, want PENDING", got.State)
+	}
+	if got.ScheduledAt == nil {
+		t.Fatal("scheduled_at is NULL, so the job is due immediately")
+	}
+	if !got.ScheduledAt.After(released) {
+		t.Errorf("scheduled_at = %s, want after %s: a release with no delay is the claim-release loop", got.ScheduledAt, released)
+	}
+	// Allow a second of slack for the round trip, but not a whole different unit.
+	if latest := released.Add(retryAfter + time.Second); got.ScheduledAt.After(latest) {
+		t.Errorf("scheduled_at = %s, want no later than %s", got.ScheduledAt, latest)
+	}
+	if got.LeaseToken != "" {
+		t.Errorf("lease_token = %q, want empty", got.LeaseToken)
+	}
+}

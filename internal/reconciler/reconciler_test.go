@@ -24,6 +24,7 @@ type fakeStore struct {
 	releaseErr     error
 	releasedJobID  string
 	releasedReason string
+	releasedAfter  time.Duration
 }
 
 func (fake *fakeStore) ClaimNextJob(_ context.Context, leaseDuration time.Duration, _ []string) (models.Job, error) {
@@ -47,11 +48,12 @@ func (fake *fakeStore) RequeueExpiredRunning(context.Context, int) (int, error) 
 	return fake.requeued, fake.requeueErr
 }
 
-func (fake *fakeStore) ReleaseClaim(_ context.Context, job models.Job, reason string) error {
+func (fake *fakeStore) ReleaseClaim(_ context.Context, job models.Job, reason string, retryAfter time.Duration) error {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	fake.releasedJobID = job.ID
 	fake.releasedReason = reason
+	fake.releasedAfter = retryAfter
 	return fake.releaseErr
 }
 
@@ -193,7 +195,7 @@ func TestReconcileTreatsRequeueErrorAsWork(t *testing.T) {
 func TestReconcileReleasesClaimWhenSubmitFails(t *testing.T) {
 	jobStore := &fakeStore{jobs: []models.Job{{ID: "job-1", LeaseToken: "lease-1"}}}
 	submitter := &fakeSubmitter{accepted: false}
-	reconciler := New(Config{BatchSize: 10}, jobStore, submitter, zerolog.Nop())
+	reconciler := New(Config{BatchSize: 10, Interval: time.Second}, jobStore, submitter, zerolog.Nop())
 
 	reconciler.reconcile(context.Background())
 
@@ -202,6 +204,11 @@ func TestReconcileReleasesClaimWhenSubmitFails(t *testing.T) {
 	}
 	if jobStore.releasedReason == "" {
 		t.Fatal("expected release reason")
+	}
+	// A release with no delay is due again on the next tick, which is the
+	// claim-release loop rather than a handover.
+	if jobStore.releasedAfter <= 0 {
+		t.Fatalf("released with retryAfter = %s, want a delay", jobStore.releasedAfter)
 	}
 }
 

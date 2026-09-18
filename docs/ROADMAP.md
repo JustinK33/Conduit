@@ -78,25 +78,30 @@ Compose rejects a `depends_on` that points at a profiled service, which is what 
 
 **Done when** `docker compose up postgres app` is a working Conduit and the dispatch-latency table has a row for the Postgres transport.
 
-## Phase 4 - The default configuration is the good one
+## Phase 4 - The default configuration is the good one (done)
 
-On the pool and reconciler defaults Conduit drains about 55 jobs/s.
-Tuned, the same hardware and the same batch does about 9.6x better (530.5), and the differences are `CONDUIT_WORKER_QUEUE_SIZE`, `CONDUIT_RECONCILER_BATCH_SIZE`, and `CONDUIT_WORKER_CONCURRENCY`.
-Whatever an evaluator measures in the first ten minutes is the number they remember, and right now that number is the bad one.
+Shipped as one default change, one breaker per task type, and a delay on release.
+Untuned now measures 606, 298, and 277 jobs/s against 419, 305, and 249 for the fully tuned configuration, so the untuned number is no longer the bad one.
 
-One correction to make before changing any default: both of those numbers were measured on the Kafka plus Redlock stack.
-`loadtest/measure.sh` routes `drain` and `drain-tuned` through `base_app`, which pins `CONDUIT_TRANSPORT=kafka` and `CONDUIT_LOCK=redlock`, and phase 3 made the defaults Postgres and advisory locks.
-So there is currently no drain measurement of the configuration this phase is named after.
-The first task is a `drain-postgres` case built on the existing `postgres_app` helper, because the dispatch dynamics differ: on Kafka a burst past the pool buffer spills onto the reconciler, whereas on `LISTEN`/`NOTIFY` the reconciler is the only claim path to begin with.
+**The premise was measured on the wrong stack, and the measurement had to come first.**
+This phase was written around "the defaults drain about 55 jobs/s, tuned does 9.6x better (530.5)".
+Both of those came from `loadtest/measure.sh`'s `drain` and `drain-tuned`, which route through `base_app`, which pins `CONDUIT_TRANSPORT=kafka` and `CONDUIT_LOCK=redlock` - and phase 3 made the defaults Postgres and advisory locks.
+On the real default stack the untuned defaults were already doing about 260-320 jobs/s before anything changed.
+`drain-postgres` and `drain-postgres-tuned` exist now, built on the `postgres_app` helper, and they are what the numbers above are.
 
-Also in this phase, and it is one bug rather than the two it was written down as.
-The circuit breaker is a single process-global instance (`cmd/server/main.go:199`), so one dead endpoint opens it for every task type at once.
-`ReleaseClaim` returns a job to `PENDING` without setting `scheduled_at` (`internal/store/store.go:360`), so the reconciler re-claims it on the very next tick.
-Together those are the claim-release loop: breaker opens, `jobWorker` releases every job it is handed, the reconciler hands them straight back.
+**The transport decides which knob matters, so the README's own tuning advice was wrong for the default.**
+On Kafka a burst past `CONDUIT_WORKER_QUEUE_SIZE` fills the pool buffer and spills onto the reconciler, which is why the queue size dominated there.
+On `LISTEN`/`NOTIFY` the reconciler is the only claim path, so `CONDUIT_RECONCILER_BATCH_SIZE` is the only knob with a measurable effect: queue size and concurrency measured as noise, alone and together, and 32 workers with 50 Postgres connections bought nothing over 8 and 10.
+So exactly one default changed, `BatchSize` 100 to 500, and it is a tail-latency argument more than a throughput one: across six back-to-back pairs the throughput margins were mostly inside the noise band, but the worst e2e p95 was 4.45 s at 100 against 1.68 s at 500.
 
-Worth correcting the diagnosis this used to carry: the loop is not the reconciler being refused by a full pool.
-`internal/reconciler/reconciler.go:157` submits with `SubmitBlocking`, which blocks rather than rejecting, so that path self-throttles and a large `BatchSize` is a claim budget rather than a pathology.
-The release on `ReleaseClaim` is the only unthrottled edge, which also says what the delay should be: the breaker's own `OpenTimeout` for a circuit-open release, and something short for a lock-contention one.
+**The claim-release loop was one bug, not the two it was written down as.**
+The breaker was a single process-global instance, so one dead endpoint opened it for every task type at once, and `ReleaseClaim` returned a job to `PENDING` without touching `scheduled_at`, so the reconciler re-claimed it on the very next tick.
+The diagnosis this used to carry was also wrong: the loop is not the reconciler being refused by a full pool.
+`internal/reconciler/reconciler.go` submits with `SubmitBlocking`, which blocks rather than rejecting, so that path self-throttles and a large `BatchSize` is a claim budget rather than a pathology.
+The release was the only unthrottled edge, which also said what the delay should be, so `ReleaseClaim` now takes a `retryAfter`: the breaker's own `OpenTimeout` for a circuit-open release, `lockContentionBackoff` for a lock-contention one, and one reconciler interval for the shutdown case.
+The breakers are built eagerly from the handler table with one shared breaker for unregistered names, which is bounded by construction and needs no mutex; a lazily-populated map keyed on `job.Task.Name` would grow without limit on caller input.
+
+Verified end to end: six `webhook` jobs against a dead endpoint trip their own breaker while a `sql.etl` job enqueued behind them still reaches `COMPLETED`, and the job that met the open circuit logged exactly one release rather than one per tick.
 
 **Done when** the untuned drain number is within 20% of the tuned one, and a task type whose endpoint is dead does not stop unrelated task types.
 

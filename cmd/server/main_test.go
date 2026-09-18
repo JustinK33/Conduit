@@ -20,7 +20,8 @@ import (
 // RUNNING claim on the Kafka path, lease renewal, and claim release.
 type fakeStore struct {
 	store.JobStore
-	updated []models.Job
+	updated  []models.Job
+	released []release
 }
 
 func (f *fakeStore) UpdateJob(_ context.Context, job models.Job) error {
@@ -30,7 +31,16 @@ func (f *fakeStore) UpdateJob(_ context.Context, job models.Job) error {
 
 func (f *fakeStore) RenewLease(context.Context, models.Job, time.Duration) error { return nil }
 
-func (f *fakeStore) ReleaseClaim(context.Context, models.Job, string) error { return nil }
+func (f *fakeStore) ReleaseClaim(_ context.Context, job models.Job, reason string, retryAfter time.Duration) error {
+	f.released = append(f.released, release{job: job, reason: reason, retryAfter: retryAfter})
+	return nil
+}
+
+type release struct {
+	job        models.Job
+	reason     string
+	retryAfter time.Duration
+}
 
 // fakeOutcome records what the worker delegated to the service layer.
 type fakeOutcome struct {
@@ -72,16 +82,18 @@ func newTestWorker(t *testing.T, st store.JobStore, out jobOutcome, handlers map
 	if err := reg.Register(prometheus.NewRegistry()); err != nil {
 		t.Fatalf("register metrics: %v", err)
 	}
+	// A threshold of 100 keeps the breaker out of the way of tests that are about
+	// something else; TestBreakerIsPerTaskType builds its own with a real one.
 	return &jobWorker{
 		store:   st,
 		outcome: out,
 		lockMgr: nopLocker{},
-		breaker: circuitbreaker.New(circuitbreaker.Config{
+		breakers: newTaskBreakers(circuitbreaker.Config{
 			FailureThreshold: 100,
 			SuccessThreshold: 1,
 			OpenTimeout:      time.Second,
 			HalfOpenRequests: 1,
-		}),
+		}, handlers),
 		metrics:  reg,
 		log:      zerolog.Nop(),
 		handlers: handlers,
@@ -239,5 +251,59 @@ func TestKafkaJobHandlerClaimsOnlyItsQueues(t *testing.T) {
 				t.Errorf("claims(%q) with %v = %v, want %v", tc.queue, tc.queues, got, tc.want)
 			}
 		})
+	}
+}
+
+// One dead endpoint used to stop every task type: a single process-global
+// breaker meant five webhook failures opened the circuit for sql.etl too. This
+// is that blast radius, so the healthy task has to still run after the broken
+// one has tripped its own breaker.
+func TestBreakerIsPerTaskType(t *testing.T) {
+	const openTimeout = 30 * time.Second
+
+	handlers := map[string]TaskHandler{
+		"broken":  func(context.Context, models.Job) error { return errors.New("connection refused") },
+		"healthy": func(context.Context, models.Job) error { return nil },
+	}
+	fs := &fakeStore{}
+	out := &fakeOutcome{}
+	jw := newTestWorker(t, fs, out, handlers)
+	jw.breakers = newTaskBreakers(circuitbreaker.Config{
+		FailureThreshold: 2,
+		SuccessThreshold: 1,
+		OpenTimeout:      openTimeout,
+		HalfOpenRequests: 1,
+	}, handlers)
+
+	job := func(task string) models.Job {
+		j := runningJob()
+		j.Task.Name = task
+		return j
+	}
+
+	// Trip the broken task's breaker.
+	for i := 0; i < 2; i++ {
+		if err := jw.Run(context.Background(), job("broken")); err == nil {
+			t.Fatalf("run %d: expected the handler error", i)
+		}
+	}
+	if err := jw.Run(context.Background(), job("broken")); err != nil {
+		t.Fatalf("an open circuit releases the job rather than erroring: %v", err)
+	}
+	if len(fs.released) != 1 {
+		t.Fatalf("releases = %d, want 1 once the circuit is open", len(fs.released))
+	}
+	// Releasing with no delay makes the job due on the reconciler's next tick,
+	// which re-claims it, which releases it, for as long as the circuit is open.
+	if got := fs.released[0].retryAfter; got != openTimeout {
+		t.Errorf("retryAfter = %s, want the breaker's open timeout %s", got, openTimeout)
+	}
+
+	out.completeCalls = 0
+	if err := jw.Run(context.Background(), job("healthy")); err != nil {
+		t.Fatalf("healthy task blocked by another task's breaker: %v", err)
+	}
+	if out.completeCalls != 1 {
+		t.Errorf("healthy Complete calls = %d, want 1", out.completeCalls)
 	}
 }

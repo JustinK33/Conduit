@@ -53,7 +53,7 @@ flowchart TD
 
 An enqueue writes the job to Postgres as `PENDING` and returns; the wake-up behind it is fire-and-forget.
 On the default transport that wake-up is a `pg_notify` carrying the job id, which cuts the reconciler's sleep short so it claims immediately instead of at the end of its idle interval; on the Kafka transport a consumer group delivers the message directly.
-Either way the job reaches the worker pool, which is bounded by a semaphore and a buffered channel, and `jobWorker` does the four things that have to happen in order: ask the circuit breaker, take the execution lock so two instances can't run one job twice, execute the registered handler under `Task.Timeout`, then report the outcome back through `JobService`.
+Either way the job reaches the worker pool, which is bounded by a semaphore and a buffered channel, and `jobWorker` does the four things that have to happen in order: ask that task's circuit breaker, take the execution lock so two instances can't run one job twice, execute the registered handler under `Task.Timeout`, then report the outcome back through `JobService`.
 A remote worker enters at the same place from the other side: it claims a job, which is one `FOR UPDATE SKIP LOCKED` statement that hands back the row and its `lease_token`, and reports the outcome with that token.
 Both paths end in the same two compare-and-swap statements, so a job's fate is written the same way whoever ran it.
 
@@ -169,32 +169,63 @@ The previous run was 4,864 req/s at p50 1.39 ms, so the four new endpoints and t
 
 This measures intake only, and the peak queue depth is the tell: the API accepts jobs about 90x faster than the system executes them.
 The default k6 task name is `k6-load-test`, which has no registered handler, so every one of those jobs is designed to fail on execution.
-Worse, they fail through the *global* circuit breaker, which then opens and starves the real work, so an intake run and an execution run cannot be the same run.
+When these ran, they failed through a single process-global circuit breaker, which then opened and starved the real work, so an intake run and an execution run could not be the same run.
+Breakers are per registered task now, with one shared between all unregistered names, so `k6-load-test` can only open that shared one and `webhook` keeps running.
+The two runs stay separate anyway: 234,000 jobs queued ahead of a drain is not a drain measurement.
 
 ### Execution
 
 2,000 real `webhook` jobs against a local sink, timed from the first enqueue until all 2,000 reach `COMPLETED` or `DEAD`.
 Latency is end-to-end wall clock out of Postgres (`updated_at - created_at`), not time spent inside the worker.
 
-Every row below was measured on the **Kafka plus Redlock** stack, which `loadtest/measure.sh` pins explicitly in `base_app`.
-That was the default when these ran and stopped being it in phase 3, so read the first row as "the pool and reconciler defaults on the Kafka transport" rather than as what you get out of the box today.
-Re-measuring on the current default is phase 4's first task.
+The default stack is Postgres `LISTEN`/`NOTIFY` plus advisory locks, which `loadtest/measure.sh drain-postgres` runs.
+The only knob that moves this number is `CONDUIT_RECONCILER_BATCH_SIZE`, because on this transport the reconciler is the only claim path there is: `CONDUIT_WORKER_QUEUE_SIZE` and `CONDUIT_WORKER_CONCURRENCY` measured as noise, alone and together.
+It is the reason the default is 500 rather than 100.
+
+Run-to-run variance on this box is large enough that a single pair of runs proves nothing, so the A/B is six pairs, each pair back to back on the same machine state:
+
+| Pair | batch 100 (old default) | batch 500 (current) |
+| --- | --- | --- |
+| 1 | 571.4 | 542.0 |
+| 2 | 324.1 | 613.5 |
+| 3 | 260.4 | 279.3 |
+| 4 | 251.3 | 259.7 |
+| 5 | 234.7 | 291.5 |
+| 6 | 174.8 | 318.5 |
+
+Throughput alone is not a clean win: 500 takes five of six pairs, but three of those margins are inside the noise band.
+The tail is the unambiguous part.
+Worst e2e p95 across the six runs was **4.45 s at batch 100 against 1.68 s at batch 500**, and batch 100's worst `max` was 5.40 s against 1.80 s.
+A claim budget of 100 per one-second tick means a 2,000-job burst needs twenty ticks in the best case, and every tick it misses is a second of latency for everything behind it.
+
+Tuning past the current defaults buys nothing measurable:
+
+| Config | jobs/s (per run) | worst e2e p95 |
+| --- | --- | --- |
+| Defaults: concurrency 8, queue 256, batch 500 | 606.1, 298.1, 276.6 | 1.27 s |
+| Concurrency 32, queue 4096, batch 2000, 50 Postgres conns | 419.3, 305.3, 249.1 | 1.15 s |
+
+That is phase 4's goal met: the untuned number is no longer the bad one, so the first thing an evaluator measures is not a misconfiguration.
+
+On the faster runs `drain_s` converges on `enqueue_s` (3.30 s against 3.18 s), which means the 20-way-parallel `curl` enqueuer is the ceiling, not Conduit.
+Treat ~600 jobs/s as a floor for the defaults on this hardware, not a capacity figure.
+
+The previous defaults were measured on the **Kafka plus Redlock** stack, which `loadtest/measure.sh` still pins in `base_app`, and the dynamics there are not the same: a burst past `CONDUIT_WORKER_QUEUE_SIZE` fills the pool's buffer, dispatch falls back to the reconciler, and the queue size is what dominates.
+Those rows are kept because they are the A/B for the transport, not because they describe the defaults:
 
 | Config (Kafka transport, Redlock) | jobs/s | e2e p50 | e2e p99 |
 | --- | --- | --- | --- |
-| Pool and reconciler defaults: concurrency 8, queue 256, batch 100 | 39.5 - 78.7 (5 runs) | 18.5 s | 26.8 s |
+| Concurrency 8, queue 256, batch 100 | 39.5 - 78.7 (5 runs) | 18.5 s | 26.8 s |
 | `CONDUIT_WORKER_QUEUE_SIZE=4096` | 195.3 | 1.69 s | - |
 | `CONDUIT_RECONCILER_BATCH_SIZE=2000` | 133.4 | 0.22 s | 14.0 s |
 | All of the above, concurrency 32 | 530.5 | 1.86 s | 3.10 s |
 
-The configuration is the bottleneck, not the architecture.
 Mean time inside a worker is 5.76 ms (`conduit_server_job_duration_seconds_sum / _count` over the 2,000-job run), so eight workers should manage roughly 1,400 jobs/s.
-They manage 55.
-A burst larger than `CONDUIT_WORKER_QUEUE_SIZE=256` fills the pool's buffer, so dispatch falls back to the reconciler, whose `CONDUIT_RECONCILER_BATCH_SIZE=100` claims per one-second tick becomes the real ceiling.
-Raising the pool's buffer is the single biggest win because it keeps work off that ceiling.
+On that stack they managed 55, which is what made "the configuration is the bottleneck, not the architecture" the phase 4 headline.
+The number turned out to be a Kafka-transport artefact as much as a defaults one: the same untuned defaults on `LISTEN`/`NOTIFY` were already doing ~260-320 jobs/s before the batch size changed.
 
-Run-to-run variance on that first row is about +/- 40% (39.6, 56.3, 54.0, 78.7, 39.5 jobs/s), which is why it is a range.
-Anything in this table under a 2x difference is noise.
+Run-to-run variance on the Kafka row is about +/- 40% (39.6, 56.3, 54.0, 78.7, 39.5 jobs/s), which is why it is a range.
+Anything in either table under a 2x difference is noise.
 
 ### What Kafka buys
 
@@ -320,7 +351,9 @@ I built all three because I wanted to know exactly what each one cost, and now t
 
 **The default configuration, not the architecture, caps throughput at 55 jobs/s.** Mean execution time is 5.76 ms, eight workers is theoretically 1,400 jobs/s, and the measured rate was 55. `CONDUIT_WORKER_QUEUE_SIZE=256` was the culprit: any burst past the buffer is refused by the pool, drops off the Kafka fast path, and inherits the reconciler's `CONDUIT_RECONCILER_BATCH_SIZE=100`-per-tick ceiling. Raising just that one value took it to 195 jobs/s and all three knobs together to 530. I had reasoned about the fast path and the fallback path as alternatives, when in practice the defaults routed nearly all traffic down the slow one.
 
-**A global circuit breaker plus a reconciler that re-claims immediately is a hot loop, not backpressure.** The first attempt at measuring throughput used the no-handler k6 task, which fails every job, which opens the one circuit breaker shared by all task types, which makes `jobWorker` release the claim, which the reconciler re-claims at 100/s, forever. 225,660 jobs `PENDING`, 41 terminal, CPU pinned. Two separate problems, both of which look fine in isolation: the breaker should be per task type, and `releaseClaim` should push `scheduled_at` out rather than making the job immediately eligible again.
+**And then a whole phase of tuning advice turned out to describe a stack nobody runs.** Every number in the paragraph above was measured through `measure.sh`'s `base_app`, which pins `CONDUIT_TRANSPORT=kafka` and `CONDUIT_LOCK=redlock`. Phase 3 had already made the defaults Postgres and advisory locks, so "out of the box Conduit drains 55 jobs/s" described a configuration you can no longer get out of the box - the actual default was doing about 260-320 before anything was tuned. The advice inverted too: on `LISTEN`/`NOTIFY` the reconciler is the only claim path, so `CONDUIT_WORKER_QUEUE_SIZE` does nothing at all and `CONDUIT_RECONCILER_BATCH_SIZE` is the only knob that moves. A measurement is only as portable as the configuration it was taken on, and a default change is the one place that distinction is load-bearing.
+
+**A global circuit breaker plus a reconciler that re-claims immediately is a hot loop, not backpressure.** The first attempt at measuring throughput used the no-handler k6 task, which fails every job, which opens the one circuit breaker shared by all task types, which makes `jobWorker` release the claim, which the reconciler re-claims at 100/s, forever. 225,660 jobs `PENDING`, 41 terminal, CPU pinned. It reads as two problems, both of which look fine in isolation, and it is really one: the breaker is now per task type, and `ReleaseClaim` now takes a `retryAfter` and pushes `scheduled_at` out by it, because a release with no delay is what closes the loop. The delay says what the fix is: a circuit-open release waits out the breaker's own `OpenTimeout`, and a lock-contention release waits a few seconds. Verified end to end afterwards: six `webhook` jobs against a dead endpoint trip their own breaker while a `sql.etl` job enqueued behind them still reaches `COMPLETED`, and the one job that met the open circuit logged exactly one release rather than one per tick.
 
 **A retry engine nobody calls still passes its unit tests.** `internal/retry` computed exponential backoff correctly and had tests to prove it, and the worker never applied the result. Jobs entered `FAILED` and stopped there permanently. In the same pass I found `Attempt` was never incremented, the `PENDING -> RUNNING` transition wasn't happening at all, and `Task.Timeout` was parsed but never turned into a `context.WithTimeout`, so a hung handler hung forever. Every one of those is a component that worked in isolation and was not wired to anything. Testing the retry engine was never the same thing as testing that jobs retry.
 
@@ -352,7 +385,7 @@ I built all three because I wanted to know exactly what each one cost, and now t
 - [PROJECT.md](PROJECT.md) has the API surface with curl examples and response shapes, plus the config table.
 - [docs/FEATURES.md](docs/FEATURES.md) goes deep on four pieces: the async publish and its tradeoff, Redlock, the Kubernetes manifests, and the CI/CD pipeline.
 - [docs/use-cases/sql-elt.md](docs/use-cases/sql-elt.md) walks a real pipeline config, with [examples/daily_revenue_pipeline.json](examples/daily_revenue_pipeline.json) as the input.
-- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API above, phase 3 is the Postgres-only default, phase 6 is the pinned image in the quick start, phase 7 is the wire contract; next is making the default configuration the fast one.
+- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API above, phase 3 is the Postgres-only default, phase 4 is the defaults and the per-task breaker, phase 6 is the pinned image in the quick start, phase 7 is the wire contract; next is multi-tenancy and operability.
 - [migrations/](migrations/) is the schema, applied by `conduit migrate` (`make migrate`, and automatically on every `make up`).
 
 ## Tech stack

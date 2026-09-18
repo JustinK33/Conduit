@@ -255,6 +255,20 @@ case "${1:-all}" in
     WORKERS=32 base_app CONDUIT_RECONCILER_BATCH_SIZE=2000 CONDUIT_WORKER_QUEUE_SIZE=4096
     WORKERS=32 run_drain "tuned"
     ;;
+  # The two rows above are Kafka plus Redlock, which stopped being the default in
+  # phase 3, and the dispatch dynamics are not the same: on Kafka a burst past the
+  # pool buffer spills onto the reconciler, whereas on LISTEN/NOTIFY the
+  # reconciler is the only claim path there is. These two are the same A/B on the
+  # configuration an adopter actually gets, and they are what phase 4's new
+  # defaults have to be argued from.
+  drain-postgres)
+    postgres_app
+    run_drain "postgres-defaults"
+    ;;
+  drain-postgres-tuned)
+    WORKERS=32 postgres_app CONDUIT_RECONCILER_BATCH_SIZE=2000 CONDUIT_WORKER_QUEUE_SIZE=4096 CONDUIT_POSTGRES_MAX_CONNS=50
+    WORKERS=32 run_drain "postgres-tuned"
+    ;;
   dispatch) base_app; run_dispatch_latency "kafka-up" "${2:-20}" ;;
   # The default configuration: no broker at all, wake-ups over LISTEN/NOTIFY.
   # This is the row that says whether dropping Kafka costs dispatch latency.
@@ -281,6 +295,8 @@ case "${1:-all}" in
     "$0" intake
     "$0" drain
     "$0" drain-tuned
+    "$0" drain-postgres
+    "$0" drain-postgres-tuned
     "$0" drain-b
     "$0" dispatch
     "$0" dispatch-postgres
@@ -289,5 +305,5 @@ case "${1:-all}" in
     "$0" crash-postgres
     echo; echo "== $OUT_DIR/results.txt =="; cat "$OUT_DIR/results.txt"
     ;;
-  *) echo "usage: $0 [all|intake|drain|drain-tuned|drain-b|dispatch|dispatch-postgres|dispatch-nokafka|crash|crash-postgres]" >&2; exit 2 ;;
+  *) echo "usage: $0 [all|intake|drain|drain-tuned|drain-postgres|drain-postgres-tuned|drain-b|dispatch|dispatch-postgres|dispatch-nokafka|crash|crash-postgres]" >&2; exit 2 ;;
 esac

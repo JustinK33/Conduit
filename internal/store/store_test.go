@@ -23,7 +23,9 @@ func (mockJobStore) ClaimNextJob(context.Context, time.Duration, []string) (mode
 }
 func (mockJobStore) RenewLease(context.Context, models.Job, time.Duration) error { return nil }
 func (mockJobStore) RequeueExpiredRunning(context.Context, int) (int, error)     { return 0, nil }
-func (mockJobStore) ReleaseClaim(context.Context, models.Job, string) error      { return nil }
+func (mockJobStore) ReleaseClaim(context.Context, models.Job, string, time.Duration) error {
+	return nil
+}
 func (mockJobStore) CompleteClaimedJob(context.Context, string, string, map[string]string) error {
 	return nil
 }

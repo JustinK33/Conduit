@@ -14,7 +14,7 @@ import (
 type JobStore interface {
 	ClaimNextJob(context.Context, time.Duration, []string) (models.Job, error)
 	RequeueExpiredRunning(context.Context, int) (int, error)
-	ReleaseClaim(context.Context, models.Job, string) error
+	ReleaseClaim(context.Context, models.Job, string, time.Duration) error
 }
 
 type Submitter interface {
@@ -155,8 +155,11 @@ func (r *Reconciler) reconcile(ctx context.Context) bool {
 		}
 
 		if !r.submitter.SubmitBlocking(ctx, job) {
+			// SubmitBlocking waits for a free slot, so it only returns false on
+			// shutdown. The job is going back for whoever starts next, and one
+			// interval is enough of a delay for that.
 			r.log.Warn().Str("job_id", job.ID).Msg("reconciler: worker pool rejected claimed job")
-			if err := r.store.ReleaseClaim(ctx, job, "worker pool rejected claimed job"); err != nil {
+			if err := r.store.ReleaseClaim(ctx, job, "worker pool rejected claimed job", r.cfg.Interval); err != nil {
 				r.log.Warn().Err(err).Str("job_id", job.ID).Msg("reconciler: release claim failed")
 			}
 			return true

@@ -29,7 +29,7 @@ type JobStore interface {
 	ClaimNextJob(context.Context, time.Duration, []string) (models.Job, error)
 	RenewLease(context.Context, models.Job, time.Duration) error
 	RequeueExpiredRunning(context.Context, int) (int, error)
-	ReleaseClaim(context.Context, models.Job, string) error
+	ReleaseClaim(context.Context, models.Job, string, time.Duration) error
 	CompleteClaimedJob(context.Context, string, string, map[string]string) error
 	FailClaimedJob(context.Context, string, string, string, *time.Time) error
 	ListJobs(context.Context, ListFilter) ([]models.Job, string, error)
@@ -357,20 +357,33 @@ func (s *PostgresStore) RequeueExpiredRunning(ctx context.Context, limit int) (i
 	return int(tag.RowsAffected()), nil
 }
 
-func (s *PostgresStore) ReleaseClaim(ctx context.Context, job models.Job, reason string) error {
+// ReleaseClaim hands a claimed job back without spending an attempt, for the
+// cases where nothing was tried: the circuit is open, or another instance holds
+// the execution lock.
+//
+// retryAfter is not optional. Releasing to PENDING with scheduled_at untouched
+// makes the job eligible again on the reconciler's very next tick, so a caller
+// that keeps refusing the same job re-claims it as fast as it can poll. That is
+// the claim-release loop, and the delay is the whole fix. Callers pass the delay
+// that matches their reason, since "the breaker is open" and "someone else holds
+// the lock" clear on very different timescales.
+func (s *PostgresStore) ReleaseClaim(ctx context.Context, job models.Job, reason string, retryAfter time.Duration) error {
+	nextRun := time.Now().UTC().Add(retryAfter)
+
 	query := fmt.Sprintf(`
 		UPDATE %s
 		SET state = 'PENDING',
 			last_error = $1,
+			scheduled_at = $2,
 			started_at = NULL,
 			lease_expires_at = NULL,
 			lease_token = NULL,
 			updated_at = NOW()
-		WHERE id = $2
+		WHERE id = $3
 		  AND state = 'RUNNING'
-		  AND lease_token = $3`, s.TableName)
+		  AND lease_token = $4`, s.TableName)
 
-	tag, err := s.Pool.Exec(ctx, query, reason, job.ID, job.LeaseToken)
+	tag, err := s.Pool.Exec(ctx, query, reason, nextRun, job.ID, job.LeaseToken)
 	if err != nil {
 		return err
 	}

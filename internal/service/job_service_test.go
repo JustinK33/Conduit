@@ -66,7 +66,9 @@ func (m *mockStore) RenewLease(_ context.Context, _ models.Job, lease time.Durat
 	return m.renewErr
 }
 func (m *mockStore) RequeueExpiredRunning(context.Context, int) (int, error) { return 0, nil }
-func (m *mockStore) ReleaseClaim(context.Context, models.Job, string) error  { return nil }
+func (m *mockStore) ReleaseClaim(context.Context, models.Job, string, time.Duration) error {
+	return nil
+}
 func (m *mockStore) CompleteClaimedJob(_ context.Context, _, _ string, meta map[string]string) error {
 	m.completeMeta = meta
 	return m.completeErr

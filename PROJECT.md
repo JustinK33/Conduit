@@ -49,7 +49,7 @@ Job Service - same methods, same retry policy
 | **API-key auth** | Bearer tokens on `/api/jobs`, constant-time compared, multiple keys for rotation |
 | **Pluggable execution lock** | `CONDUIT_LOCK=advisory` (default) uses `pg_try_advisory_lock`; `redlock` uses a multi-node Redis quorum; `none` relies on the atomic claim alone. Guards duplicated effort, not correctness. |
 | **Exponential backoff** | Configurable base, multiplier, cap, and jitter |
-| **Circuit breaker** | Closed / Open / Half-Open state machine protecting downstream calls |
+| **Circuit breaker** | Closed / Open / Half-Open state machine, one per registered task name plus one shared by unregistered ones, so a dead endpoint stops only its own task |
 | **Cron scheduler** | 5-field cron expressions with `*/n`, ranges, and lists - zero external dependencies |
 | **Bounded worker pool** | Semaphore-controlled concurrency with graceful shutdown |
 | **Prometheus metrics** | Counters, gauges, histograms exposed on `/metrics` |
@@ -268,4 +268,7 @@ The tuning that drove the intake numbers:
 - pgx pool: MaxConns 25 → 50, added MaxConnLifetime / MaxConnIdleTime / HealthCheckPeriod
 - Kafka producer, when selected: snappy compression, 5ms flush frequency, 1MiB flush threshold, 256-deep channel buffer
 
-`CONDUIT_WORKER_QUEUE_SIZE` is the knob that dominates execution throughput, not `CONDUIT_WORKER_CONCURRENCY`; the README explains why.
+On the default transport, `CONDUIT_RECONCILER_BATCH_SIZE` is the only knob that moves the drain, and it is why the default is 500 rather than 100.
+`CONDUIT_WORKER_QUEUE_SIZE` and `CONDUIT_WORKER_CONCURRENCY` measured as noise; the README has the sweep.
+The clearest part of that difference is the tail rather than the throughput: worst e2e p95 across six pairs was 4.45 s at batch 100 against 1.68 s at 500.
+It was the other way round on the Kafka transport, where the queue size dominated, so the advice does not carry between the two.
