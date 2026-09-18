@@ -28,7 +28,7 @@ spec:
       # the code that reads it have to come from one build. Bump them together.
       initContainers:
         - name: migrate
-          image: ghcr.io/justink33/conduit:v0.1.0
+          image: ghcr.io/justink33/conduit:v0.2.0
           imagePullPolicy: IfNotPresent
           args: ["migrate"]
           envFrom:
@@ -45,7 +45,7 @@ spec:
               memory: "128Mi"
       containers:
         - name: conduit
-          image: ghcr.io/justink33/conduit:v0.1.0
+          image: ghcr.io/justink33/conduit:v0.2.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

@@ -213,6 +213,7 @@ Times are RFC 3339 in UTC.
 
 Both fields looked different before v0.2.0: `payload` was base64 and `timeout` was an integer count of nanoseconds.
 A client written against v0.1.0 gets a 400 rather than a silent misread.
+[UPGRADING.md](UPGRADING.md) is the before-and-after, including the one case that does not produce a 400.
 
 ## Status codes
 

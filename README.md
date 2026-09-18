@@ -62,7 +62,7 @@ The reconciler runs on its own ticker doing the two jobs no transport can: pulli
 It is also the reason a transport is optional at all - it is already the guaranteed delivery path, so the transport only ever makes dispatch faster.
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the full diagram, the state machine, and a per-package breakdown.
-[docs/decisions/](docs/decisions/) has the six decisions that shaped it, each with its costs written out.
+[docs/decisions/](docs/decisions/) has the seven decisions that shaped it, each with its costs written out.
 
 ## Quick start
 
@@ -78,11 +78,11 @@ docker run -d --name conduit-pg --network conduit \
 DSN='postgres://conduit:conduit@conduit-pg:5432/conduit?sslmode=disable'
 
 docker run --rm --network conduit -e CONDUIT_POSTGRES_DSN="$DSN" \
-  ghcr.io/justink33/conduit:v0.1.0 migrate
+  ghcr.io/justink33/conduit:v0.2.0 migrate
 
 docker run -d --name conduit --network conduit -p 8080:8080 \
   -e CONDUIT_POSTGRES_DSN="$DSN" \
-  ghcr.io/justink33/conduit:v0.1.0
+  ghcr.io/justink33/conduit:v0.2.0
 ```
 
 ```bash
@@ -91,7 +91,8 @@ curl -X POST localhost:8080/api/jobs -H 'content-type: application/json' \
 ```
 
 `amd64` and `arm64` images are published, so that runs natively on an Apple Silicon or Graviton machine rather than under emulation.
-The tag is a pin: `:v0.1.0` never moves, `:latest` follows the newest release, and `:main` follows the tip of this branch.
+The tag is a pin: `:v0.2.0` never moves, `:latest` follows the newest release, and `:main` follows the tip of this branch.
+v0.2.0 changed the wire format, so a client written against v0.1.0 needs [docs/UPGRADING.md](docs/UPGRADING.md).
 
 That quickstart is a local trial and not a deployment: the database password is `conduit`, there is no TLS, and `CONDUIT_API_KEYS` is unset so anything that can reach port 8080 can enqueue work.
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is the checklist for the real thing.
@@ -175,20 +176,24 @@ Worse, they fail through the *global* circuit breaker, which then opens and star
 2,000 real `webhook` jobs against a local sink, timed from the first enqueue until all 2,000 reach `COMPLETED` or `DEAD`.
 Latency is end-to-end wall clock out of Postgres (`updated_at - created_at`), not time spent inside the worker.
 
-| Config | jobs/s | e2e p50 | e2e p99 |
+Every row below was measured on the **Kafka plus Redlock** stack, which `loadtest/measure.sh` pins explicitly in `base_app`.
+That was the default when these ran and stopped being it in phase 3, so read the first row as "the pool and reconciler defaults on the Kafka transport" rather than as what you get out of the box today.
+Re-measuring on the current default is phase 4's first task.
+
+| Config (Kafka transport, Redlock) | jobs/s | e2e p50 | e2e p99 |
 | --- | --- | --- | --- |
-| Defaults: concurrency 8, queue 256, reconciler batch 100 | 39.5 - 78.7 (5 runs) | 18.5 s | 26.8 s |
+| Pool and reconciler defaults: concurrency 8, queue 256, batch 100 | 39.5 - 78.7 (5 runs) | 18.5 s | 26.8 s |
 | `CONDUIT_WORKER_QUEUE_SIZE=4096` | 195.3 | 1.69 s | - |
 | `CONDUIT_RECONCILER_BATCH_SIZE=2000` | 133.4 | 0.22 s | 14.0 s |
 | All of the above, concurrency 32 | 530.5 | 1.86 s | 3.10 s |
 
-The default configuration is the bottleneck, not the architecture.
+The configuration is the bottleneck, not the architecture.
 Mean time inside a worker is 5.76 ms (`conduit_server_job_duration_seconds_sum / _count` over the 2,000-job run), so eight workers should manage roughly 1,400 jobs/s.
 They manage 55.
-A burst larger than `CONDUIT_WORKER_QUEUE_SIZE=256` gets refused by the pool, falls off the Kafka fast path, and lands on the reconciler, whose `CONDUIT_RECONCILER_BATCH_SIZE=100` claims per one-second tick becomes the real ceiling.
-Raising the pool's buffer is the single biggest win because it keeps work on the fast path at all.
+A burst larger than `CONDUIT_WORKER_QUEUE_SIZE=256` fills the pool's buffer, so dispatch falls back to the reconciler, whose `CONDUIT_RECONCILER_BATCH_SIZE=100` claims per one-second tick becomes the real ceiling.
+Raising the pool's buffer is the single biggest win because it keeps work off that ceiling.
 
-Run-to-run variance on the default config is about +/- 40% (39.6, 56.3, 54.0, 78.7, 39.5 jobs/s), which is why that row is a range.
+Run-to-run variance on that first row is about +/- 40% (39.6, 56.3, 54.0, 78.7, 39.5 jobs/s), which is why it is a range.
 Anything in this table under a 2x difference is noise.
 
 ### What Kafka buys
@@ -339,14 +344,15 @@ I built all three because I wanted to know exactly what each one cost, and now t
 
 ## Documentation
 
-- [docs/decisions/](docs/decisions/) is six decision records with a column for the uncomfortable part of each: Postgres as the source of truth, Kafka as transport only, Redlock over advisory locks, leases instead of Kafka redelivery, the webhook execution model, and workers pulling over HTTP instead of importing an SDK.
+- [docs/decisions/](docs/decisions/) is seven decision records with a column for the uncomfortable part of each: Postgres as the source of truth, Kafka as transport only, Redlock over advisory locks, leases instead of Kafka redelivery, the webhook execution model, workers pulling over HTTP instead of importing an SDK, and a strict wire contract that breaks every older client on purpose.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the reference: system diagram, job state machine, and a package-by-package breakdown.
-- [docs/WORKERS.md](docs/WORKERS.md) is how you write a worker: the four endpoints, the lease and heartbeat contract, what to do when you lose a lease, and the two wire-format quirks a non-Go client hits.
+- [docs/WORKERS.md](docs/WORKERS.md) is how you write a worker: the four endpoints, the lease and heartbeat contract, what to do when you lose a lease, and the exact request and response shapes.
+- [docs/UPGRADING.md](docs/UPGRADING.md) is what to change per release. v0.2.0 broke the wire format, including the outbound webhook envelope, so a v0.1.0 client and any endpoint receiving Conduit webhooks both need a change.
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is the reverse proxy recipe, in Caddy and nginx, and why one is not optional: Conduit has no TLS and four endpoints that are deliberately unauthenticated.
 - [PROJECT.md](PROJECT.md) has the API surface with curl examples and response shapes, plus the config table.
 - [docs/FEATURES.md](docs/FEATURES.md) goes deep on four pieces: the async publish and its tradeoff, Redlock, the Kubernetes manifests, and the CI/CD pipeline.
 - [docs/use-cases/sql-elt.md](docs/use-cases/sql-elt.md) walks a real pipeline config, with [examples/daily_revenue_pipeline.json](examples/daily_revenue_pipeline.json) as the input.
-- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API above, phase 3 is the Postgres-only default, phase 6 is the pinned image in the quick start; next is making the default configuration the fast one.
+- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API above, phase 3 is the Postgres-only default, phase 6 is the pinned image in the quick start, phase 7 is the wire contract; next is making the default configuration the fast one.
 - [migrations/](migrations/) is the schema, applied by `conduit migrate` (`make migrate`, and automatically on every `make up`).
 
 ## Tech stack

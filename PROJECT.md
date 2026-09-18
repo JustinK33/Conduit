@@ -141,7 +141,7 @@ curl -X POST http://localhost:8080/api/jobs \
 
 # Check status
 curl http://localhost:8080/api/jobs/4a7b1c2d-...
-# → {"ID":"4a7b1c2d-...","State":"COMPLETED",...}
+# → {"id":"4a7b1c2d-...","state":"COMPLETED","attempt":1,...}
 
 # Cancel
 curl -X POST http://localhost:8080/api/jobs/4a7b1c2d-.../cancel
