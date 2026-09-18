@@ -293,7 +293,7 @@ spec:
       terminationGracePeriodSeconds: 35  # longer than ShutdownTimeout (30s)
       containers:
         - name: conduit
-          image: ghcr.io/justink33/conduit:v0.3.0
+          image: ghcr.io/justink33/conduit:v0.3.1
           envFrom:
             - configMapRef:
                 name: conduit-config   # non-secret env vars

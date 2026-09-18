@@ -1,6 +1,6 @@
 # Upgrading
 
-## v0.2.0 to v0.3.0
+## v0.2.0 to v0.3.1
 
 Nothing to change. No wire change, no database migration, and a v0.2.0 client works unmodified.
 Three behaviour changes worth knowing about, all of them in the direction of doing less damage:
@@ -20,6 +20,10 @@ When Conduit hands a claimed job back without trying it - the circuit is open, o
 The delay is the breaker's `OpenTimeout` (30 s) for a circuit-open release and 5 s for lock contention.
 So a job blocked by an open circuit sits in `PENDING` with `last_error = 'circuit open'` for up to 30 seconds instead of being re-claimed every second.
 That is the intended behaviour, not a stall.
+
+A release also gives the attempt back, since `attempt` is incremented at claim time and a released job never ran.
+v0.3.0 did not, so on that release a job that met an open circuit twice reached `max_retries` having executed once and died for a reason that was not its own.
+Pin `v0.3.1` or later, not `v0.3.0`.
 
 ## v0.1.0 to v0.2.0
 
