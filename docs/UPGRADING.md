@@ -1,5 +1,26 @@
 # Upgrading
 
+## v0.2.0 to v0.3.0
+
+Nothing to change. No wire change, no database migration, and a v0.2.0 client works unmodified.
+Three behaviour changes worth knowing about, all of them in the direction of doing less damage:
+
+**`CONDUIT_RECONCILER_BATCH_SIZE` now defaults to 500 rather than 100.**
+It is a per-tick claim budget, not a buffer, and the reconciler submits with `SubmitBlocking`, so a larger budget costs no memory and stops on a full worker pool by itself.
+If you set it explicitly, your value still wins.
+Raising it is what stops a burst from queueing behind a 100-per-second claim ceiling; the README's Execution table has the measurements.
+
+**Circuit breakers are per task name.**
+There used to be one for the whole process, so five failures against one dead endpoint opened the circuit for every other task type too.
+Unregistered task names share a single breaker, since they fail on every attempt regardless.
+If you were relying on one failing task type stopping everything, that is no longer what happens.
+
+**A released claim is now deferred rather than immediately eligible.**
+When Conduit hands a claimed job back without trying it - the circuit is open, or another instance holds the execution lock - it sets `scheduled_at` into the future instead of leaving the job due now.
+The delay is the breaker's `OpenTimeout` (30 s) for a circuit-open release and 5 s for lock contention.
+So a job blocked by an open circuit sits in `PENDING` with `last_error = 'circuit open'` for up to 30 seconds instead of being re-claimed every second.
+That is the intended behaviour, not a stall.
+
 ## v0.1.0 to v0.2.0
 
 v0.2.0 changes the wire format. It breaks every v0.1.0 client and every endpoint already receiving Conduit webhooks.

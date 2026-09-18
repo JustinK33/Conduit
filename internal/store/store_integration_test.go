@@ -64,13 +64,19 @@ func TestJobRoundTripWithoutIdempotencyKey(t *testing.T) {
 	s := NewPostgresStore(pool, table)
 	id := "test-" + time.Now().UTC().Format("20060102150405.000000000")
 	now := time.Now().UTC()
+	// Due a minute ago rather than now: scheduled_at is written from this process
+	// and ClaimNextJob compares it against the database's NOW(). A Docker VM whose
+	// clock has drifted behind the host - nine seconds, measured, after the host
+	// slept - makes a job scheduled for "now" not yet due, and the claim below
+	// fails with ErrJobNotFound for a reason that has nothing to do with the code.
+	due := now.Add(-time.Minute)
 
 	// No IdempotencyKey and no LeaseToken, so both columns land as NULL.
 	job := models.Job{
 		ID:          id,
 		Task:        models.Task{ID: id, Name: "integration-probe", Queue: "default"},
 		State:       models.JobStatePending,
-		ScheduledAt: &now,
+		ScheduledAt: &due,
 		CreatedAt:   now,
 	}
 	if err := s.CreateJob(ctx, job); err != nil {
@@ -129,7 +135,10 @@ func TestClaimNextJobQueueFilter(t *testing.T) {
 	// created. Its own table is the only way to be deterministic.
 	table := claimTestTable(ctx, t, pool)
 	s := NewPostgresStore(pool, table)
-	now := time.Now().UTC()
+	// A minute in the past, because scheduled_at is written from here and the
+	// claim compares it against the database's NOW(): a Docker VM a few seconds
+	// behind the host makes a job scheduled for "now" not yet due.
+	now := time.Now().UTC().Add(-time.Minute)
 
 	tests := []struct {
 		name      string
@@ -527,13 +536,18 @@ func TestReleaseClaimDefersTheJob(t *testing.T) {
 	// job first. See TestClaimNextJobQueueFilter.
 	s := NewPostgresStore(pool, claimTestTable(ctx, t, pool))
 	now := time.Now().UTC()
-	id := "test-release-" + time.Now().UTC().Format("20060102150405.000000000")
+	// Due a minute ago, not now: scheduled_at comes from this process and
+	// ClaimNextJob compares it against the database's NOW(), so a Docker VM whose
+	// clock has drifted a few seconds behind the host makes a job scheduled for
+	// "now" not yet due. Caught that way once, as a claim that found nothing.
+	due := now.Add(-time.Minute)
+	id := "test-release-" + now.Format("20060102150405.000000000")
 
 	if err := s.CreateJob(ctx, models.Job{
 		ID:          id,
 		Task:        models.Task{ID: id, Name: "webhook", Queue: "default"},
 		State:       models.JobStatePending,
-		ScheduledAt: &now,
+		ScheduledAt: &due,
 		CreatedAt:   now,
 	}); err != nil {
 		t.Fatalf("CreateJob: %v", err)
@@ -556,6 +570,12 @@ func TestReleaseClaimDefersTheJob(t *testing.T) {
 	}
 	if got.State != models.JobStatePending {
 		t.Errorf("state = %s, want PENDING", got.State)
+	}
+	// ClaimNextJob took it to 1 and nothing ran, so the refusal must not spend
+	// the retry budget: a job that meets an open circuit twice would otherwise
+	// reach MaxRetries having executed once.
+	if got.Attempt != 0 {
+		t.Errorf("attempt = %d, want 0: a release that ran nothing must give the attempt back", got.Attempt)
 	}
 	if got.ScheduledAt == nil {
 		t.Fatal("scheduled_at is NULL, so the job is due immediately")

@@ -357,9 +357,15 @@ func (s *PostgresStore) RequeueExpiredRunning(ctx context.Context, limit int) (i
 	return int(tag.RowsAffected()), nil
 }
 
-// ReleaseClaim hands a claimed job back without spending an attempt, for the
-// cases where nothing was tried: the circuit is open, or another instance holds
-// the execution lock.
+// ReleaseClaim hands a claimed job back for the cases where nothing was tried:
+// the circuit is open, or another instance holds the execution lock.
+//
+// The attempt counter goes back down, because ClaimNextJob incremented it and
+// the job did not run. Leaving it up spends the retry budget on refusals: a job
+// that meets an open circuit twice reaches its MaxRetries having executed once,
+// and dies for a reason that was never its own. This is the one place an attempt
+// is given back, and it is safe because the release is the same statement that
+// clears the lease.
 //
 // retryAfter is not optional. Releasing to PENDING with scheduled_at untouched
 // makes the job eligible again on the reconciler's very next tick, so a caller
@@ -373,6 +379,7 @@ func (s *PostgresStore) ReleaseClaim(ctx context.Context, job models.Job, reason
 	query := fmt.Sprintf(`
 		UPDATE %s
 		SET state = 'PENDING',
+			attempt = GREATEST(attempt - 1, 0),
 			last_error = $1,
 			scheduled_at = $2,
 			started_at = NULL,
