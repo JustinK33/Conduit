@@ -46,7 +46,9 @@ func (m mockQueue) Claim(context.Context, []string, time.Duration) (models.Job, 
 func (m mockQueue) Heartbeat(context.Context, string, string, time.Duration) (time.Time, error) {
 	return time.Time{}, nil
 }
-func (m mockQueue) Complete(context.Context, string, string, map[string]string) error { return nil }
+func (m mockQueue) Complete(context.Context, string, string, map[string]string) (models.Job, error) {
+	return models.Job{}, nil
+}
 func (m mockQueue) Fail(context.Context, string, string, string, bool) (models.Job, error) {
 	return models.Job{}, nil
 }
@@ -72,7 +74,9 @@ func (s *spyQueue) Claim(context.Context, []string, time.Duration) (models.Job, 
 func (s *spyQueue) Heartbeat(context.Context, string, string, time.Duration) (time.Time, error) {
 	return time.Time{}, nil
 }
-func (s *spyQueue) Complete(context.Context, string, string, map[string]string) error { return nil }
+func (s *spyQueue) Complete(context.Context, string, string, map[string]string) (models.Job, error) {
+	return models.Job{}, nil
+}
 func (s *spyQueue) Fail(context.Context, string, string, string, bool) (models.Job, error) {
 	return models.Job{}, nil
 }
@@ -83,6 +87,7 @@ type mockStore struct {
 	getErr            error
 	idempotencyJob    models.Job
 	idempotencyGetErr error
+	requeueErr        error
 }
 
 func (m mockStore) CreateJob(context.Context, models.Job) error { return nil }
@@ -100,8 +105,8 @@ func (m mockStore) ClaimNextJob(context.Context, time.Duration, []string) (model
 func (m mockStore) RenewLease(context.Context, models.Job, time.Duration) error           { return nil }
 func (m mockStore) RequeueExpiredRunning(context.Context, int) (int, error)               { return 0, nil }
 func (m mockStore) ReleaseClaim(context.Context, models.Job, string, time.Duration) error { return nil }
-func (m mockStore) CompleteClaimedJob(context.Context, string, string, map[string]string) error {
-	return nil
+func (m mockStore) CompleteClaimedJob(context.Context, string, string, map[string]string) (models.Job, error) {
+	return models.Job{}, nil
 }
 func (m mockStore) FailClaimedJob(context.Context, string, string, string, *time.Time) error {
 	return nil
@@ -109,6 +114,7 @@ func (m mockStore) FailClaimedJob(context.Context, string, string, string, *time
 func (m mockStore) ListJobs(context.Context, store.ListFilter) ([]models.Job, string, error) {
 	return nil, "", nil
 }
+func (m mockStore) RequeueDeadJob(context.Context, string) error { return m.requeueErr }
 
 func TestNewHandler(t *testing.T) {
 	t.Run("wires queue and store dependencies", func(t *testing.T) {
@@ -417,6 +423,51 @@ func TestCancelJob(t *testing.T) {
 
 			if w.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestRequeueJob(t *testing.T) {
+	tests := []struct {
+		name       string
+		store      mockStore
+		wantStatus int
+	}{
+		{
+			name:       "a dead job is requeued",
+			store:      mockStore{},
+			wantStatus: http.StatusOK,
+		},
+		{
+			// DEAD stays terminal for every automatic path; a RUNNING or COMPLETED
+			// job is refused rather than silently ignored.
+			name:       "a non-DEAD job returns 409",
+			store:      mockStore{requeueErr: store.ErrInvalidTransition},
+			wantStatus: http.StatusConflict,
+		},
+		{
+			name:       "an unknown job returns 404",
+			store:      mockStore{requeueErr: store.ErrJobNotFound},
+			wantStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHandler(mockQueue{}, tc.store, zerolog.Logger{}, testRegistry(), nil)
+			router := gin.New()
+			h.RegisterRoutes(router)
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/jobs/job-1/requeue", nil)
+			router.ServeHTTP(w, req)
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+			if tc.wantStatus == http.StatusOK && !strings.Contains(w.Body.String(), "PENDING") {
+				t.Errorf("response should report the new state, got: %s", w.Body.String())
 			}
 		})
 	}

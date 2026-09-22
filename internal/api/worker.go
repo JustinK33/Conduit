@@ -92,7 +92,7 @@ func (h *Handler) ClaimJob(c *gin.Context) {
 
 	// Same counter the in-process worker increments, so remote execution shows
 	// up on the existing dashboards rather than looking like an idle system.
-	h.Metrics.JobStarted.Inc()
+	h.Metrics.IncJobStarted(job.Task.Name)
 
 	// job serialises with LeaseToken elided (json:"-"), so the token appears
 	// exactly once in the API surface: here, alongside it.
@@ -145,7 +145,8 @@ func (h *Handler) CompleteJob(c *gin.Context) {
 		return
 	}
 
-	if err := h.Queue.Complete(c.Request.Context(), id, request.LeaseToken, request.Metadata); err != nil {
+	job, err := h.Queue.Complete(c.Request.Context(), id, request.LeaseToken, request.Metadata)
+	if err != nil {
 		if respondLeaseLost(c, err) {
 			return
 		}
@@ -154,7 +155,7 @@ func (h *Handler) CompleteJob(c *gin.Context) {
 		return
 	}
 
-	h.Metrics.JobCompleted.Inc()
+	h.Metrics.IncJobCompleted(job.Task.Name)
 	c.JSON(http.StatusOK, gin.H{"state": "COMPLETED"})
 }
 
@@ -189,7 +190,7 @@ func (h *Handler) FailJob(c *gin.Context) {
 		return
 	}
 
-	h.Metrics.JobFailed.Inc()
+	h.Metrics.IncJobFailed(job.Task.Name)
 	c.JSON(http.StatusOK, gin.H{
 		"state":        job.State,
 		"attempt":      job.Attempt,

@@ -107,13 +107,19 @@ Verified end to end: six `webhook` jobs against a dead endpoint trip their own b
 
 ## Phase 5 - Operability under real load
 
+Three of these shipped in v0.4.0.
+
+- ~~Manual retry and dead-letter requeue endpoints, so a `DEAD` job is recoverable without a SQL prompt.~~ `POST /api/jobs/:id/requeue`. `CanTransition` was not loosened: `DEAD` stays terminal for every automatic path, and the store method that resurrects a job says in its comment that it is the deliberate human-driven exception.
+- ~~Labels on the job metrics, which currently have none, so per-queue and per-task breakdowns are possible at all.~~ A single `task` label, bounded to the handler set registered at boot plus `other`, because task names come from callers and an unfiltered label is unbounded cardinality on untrusted input. That is the argument the per-task circuit breaker already settled.
+- ~~Grafana dashboards, or at minimum documented panels, for queue depth, latency, failures, retries, and worker saturation.~~ Partly: `jobs_backlog{state}` is the queue-depth metric that did not exist, and [DEPLOYMENT.md](DEPLOYMENT.md#monitoring) has the PromQL for it, the per-task failure rate, dead-letter growth, and the duration p95. Provisioned dashboards are still not in the repo.
+
+Still open:
+
 - Queue priority, so an urgent queue is not stuck behind a batch job.
 - Long-poll on claim, replacing poll-and-204, once claim QPS makes the polling overhead worth removing.
 - Task-name filters on claim, finer-grained than queue routing.
-- Manual retry and dead-letter requeue endpoints, so a `DEAD` job is recoverable without a SQL prompt.
 - List responses that omit payloads by default.
-- Grafana dashboards, or at minimum documented panels, for queue depth, latency, failures, retries, and worker saturation.
-- Labels on the job metrics, which currently have none, so per-queue and per-task breakdowns are possible at all.
+- Provisioned Grafana dashboards, rather than PromQL in a doc.
 
 **Done when** running Conduit for a week does not require opening `psql`.
 
@@ -184,11 +190,39 @@ Two things worth recording because they were not obvious going in.
 
 **Done when** the pre-`dc0844a` body returns 400 naming `queue` instead of 201, and no command in the repo pipes anything through `base64` to enqueue a job.
 
+## Phase 8 - The scheduler was wired to nothing (done)
+
+Shipped in v0.4.0, alongside retention and the operability items above.
+
+**The problem.** `cmd/server/main.go` constructed the scheduler and started it, `internal/scheduler` had a hand-written 5-field cron parser with unit tests and two benchmarks whose numbers the README quotes, and `Task.CronExpression` was written to Postgres and read back by `scanJob`.
+Nothing in the tree ever called `Register`, so the tick ran over an empty entry map forever and no schedule could exist.
+Meanwhile `PROJECT.md` listed "Cron scheduler" as a key feature, `.env.example` exposed three `CONDUIT_SCHEDULER_*` knobs that changed nothing observable, and `docs/use-cases/sql-elt.md` sold Conduit as the thing you use "without running Airflow, Dagster, or a separate scheduler" - while a nightly `sql.etl` job required exactly that separate scheduler.
+
+**Why every earlier phase missed it.** The package existed, was tested, was benchmarked, was documented, and was started at boot.
+That is the shape of a finished feature from every angle except the one that matters, which is whether any code path reaches it.
+Tests that exercise a package directly cannot tell you the package is unreachable; the entry point is the only place that fact is visible, and nobody reads `main.go` looking for an absence.
+
+The lesson worth keeping: a feature is not wired until something outside its own package and its own tests calls it.
+Coverage measures whether code runs under test, not whether it runs in production.
+
+**The change.** Schedules are rows in Postgres (`migrations/004`), managed over three endpoints, fired by the tick that already existed.
+`Register`, `Entry`, and `lastRun` are gone; the parser and both benchmarks are untouched.
+Dedup across replicas reuses two mechanisms already in the tree rather than adding a leader election - an idempotency key derived from the fire instant, and a conditional advance - which is why it is safe at the ten replicas `hpa.yaml` scales to.
+`Task.CronExpression`, the field that was written and never read, stays for now as the one thing this phase did not clean up.
+
+**Retention** shipped in the same release for a related reason: nothing in the repo had ever issued a `DELETE` against `jobs`, and `DEPLOYMENT.md` did not list it as a gap, so an operator found out from disk usage.
+Completed jobs are pruned after seven days by default; dead-lettered ones are kept forever, because a `DEAD` job is the one somebody wants to read.
+
+**Done when** a nightly `sql.etl` pipeline runs on a schedule Conduit owns, with no second scheduler, and the `jobs` table does not grow for the life of the deployment.
+
 ## Documentation hygiene
 
 Tracked here because it keeps recurring, not because it is a phase.
 Currently clear: every default in `PROJECT.md`'s environment table matches `internal/config/config.go`, the endpoint counts match `internal/api/handler.go`, `docs/FEATURES.md`'s probe paths and ConfigMap match `deploy/k8s/`, and `CONDUIT_METRICS_SUBSYSTEM` is `server` in the code, in `.env.example`, in the ConfigMap, and in every metric name the docs quote.
 The pattern to watch for is a doc that quotes a default or a path rather than pointing at the file that owns it.
+
+It caught something in v0.4.0: `.env.example` said `CONDUIT_SCHEDULER_TICK_INTERVAL=1s` against a code default of `1m`, and neither value did anything because the scheduler was unreachable.
+A stale number in a file that repeats a default is the cheap version of this failure; phase 8 is the expensive version.
 
 ## Already done
 

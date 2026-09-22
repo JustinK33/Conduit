@@ -204,6 +204,70 @@ Applying twice is a no-op, which is what makes it safe to run unconditionally on
 - Kubernetes runs it as an init container on every replica. The second and third pods find nothing to do. An init container rather than a `Job` because it also covers the rollout case, where a new image's schema has to land before that image starts serving.
 - Outside a container: `./bin/conduit migrate`, with `CONDUIT_POSTGRES_MIGRATIONS_PATH` pointing at the directory if you are not running from the repository root.
 
+## Retention
+
+Conduit deletes finished jobs so the table does not grow for the life of the deployment.
+
+| Variable | Default | What it keeps |
+|---|---|---|
+| `CONDUIT_RETENTION_COMPLETED` | `168h` | Completed jobs, for seven days |
+| `CONDUIT_RETENTION_DEAD` | `0` | Dead-lettered jobs, forever |
+| `CONDUIT_RETENTION_INTERVAL` | `1h` | How often the sweep runs |
+| `CONDUIT_RETENTION_BATCH_SIZE` | `1000` | Rows per `DELETE`, so one pass cannot hold a long lock |
+
+A zero age keeps that state forever, and it is the `DEAD` default: a dead-lettered job is the one somebody wants to read.
+Set `CONDUIT_RETENTION_COMPLETED=0` if you are shipping job history somewhere else and want Conduit to keep all of it.
+
+Two things worth knowing before the first seven days elapse:
+
+- **The sweep runs on the reconciler.** An instance with `CONDUIT_RECONCILER_ENABLED=false` prunes nothing, so a deployment where every instance is API-only never prunes at all. Leave the reconciler on somewhere.
+- **`completed_at` is the clock, not `created_at`.** A job that sat `PENDING` for a month and completed yesterday is a day old by this measure, which is the behaviour you want: nothing deletes work that has not finished.
+
+The claim path is unaffected either way, because `migrations/001` indexes `PENDING` and `RUNNING` through partial indexes.
+What retention protects is `jobs_created_idx`, `jobs_state_created_idx`, and the disk.
+
+## Requeueing a dead job
+
+```bash
+curl -X POST http://localhost:8080/api/jobs/$ID/requeue -H "Authorization: Bearer $KEY"
+```
+
+`DEAD` back to `PENDING` with `attempt = 0`, due immediately, lease columns cleared.
+This is the endpoint for the morning after a bad deploy: the jobs that dead-lettered against a broken endpoint go back in without a `psql` session.
+
+Only `DEAD` is requeueable.
+A `RUNNING` job has a worker holding its lease and a `COMPLETED` one already succeeded, so both get a `409` rather than a silent no-op.
+Find the candidates with `GET /api/jobs?state=DEAD`.
+
+## Monitoring
+
+The five job counters carry a `task` label, and the label set is bounded to the handlers registered at boot plus `other`.
+Task names come from callers, so an unfiltered label would be unbounded cardinality on untrusted input; a name Conduit has no handler for reports as `other`, which is also the name you will see if a caller typos a task.
+
+`conduit_server_jobs_backlog{state}` is sampled by the reconciler every `CONDUIT_RECONCILER_BACKLOG_INTERVAL` (default `10s`).
+**Every instance reports the same database-wide numbers**, so aggregate it with `max by (state)`.
+`sum` over three replicas triples your backlog.
+
+```promql
+# Is it keeping up? A backlog that climbs and does not come back down is the
+# only queue question that matters.
+max by (state) (conduit_server_jobs_backlog)
+
+# Which task is failing, as a fraction of its own throughput. Sum over
+# instances now that the counters carry a label.
+sum by (task) (rate(conduit_server_jobs_failed_total[5m]))
+  / sum by (task) (rate(conduit_server_jobs_started_total[5m]))
+
+# Dead-letter growth. Flat is healthy; a step is a deploy that broke something.
+max(conduit_server_jobs_backlog{state="DEAD"})
+
+# Execution time by task, p95.
+histogram_quantile(0.95,
+  sum by (task, le) (rate(conduit_server_job_duration_seconds_bucket[5m])))
+```
+
+Alert on the backlog and on the dead-letter step, not on a failure rate: a queue whose whole job is to retry will have a nonzero failure rate all day.
+
 ## Checklist
 
 - [ ] `CONDUIT_API_KEYS` set to at least one 32-byte random key. Absent means the API is open, and the server warns about it at boot.
@@ -215,6 +279,8 @@ Applying twice is a no-op, which is what makes it safe to run unconditionally on
 - [ ] `CONDUIT_POSTGRES_DSN` pointing at a database with backups. Postgres is the source of truth; losing it loses the queue.
 - [ ] `conduit migrate` run against the target database, by the compose service, the init container, or by hand.
 - [ ] A `:vX.Y.Z` tag pinned, not `:latest` or `:main`, and the same tag on both containers in `deployment.yaml`.
+- [ ] At least one instance with `CONDUIT_RECONCILER_ENABLED=true`, or nothing requeues expired leases, prunes finished jobs, or samples the backlog gauge.
+- [ ] `CONDUIT_RETENTION_COMPLETED` decided deliberately. The default deletes completed jobs after seven days; `0` keeps them forever.
 
 ## Known gaps
 

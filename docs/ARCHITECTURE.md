@@ -171,17 +171,26 @@ Nine Gin job endpoints, registered in `RegisterRoutes`. The whole group sits beh
 | `GET`  | `/api/jobs/by-idempotency-key/:key` | Look up the job a given idempotency key produced. |
 | `GET`  | `/api/jobs/:id` | Reads directly from Postgres. Never includes `lease_token`. |
 | `POST` | `/api/jobs/:id/cancel` | Transitions job to DEAD. |
+| `POST` | `/api/jobs/:id/requeue` | DEAD back to PENDING with `attempt = 0`. `409` on any other state. |
 | `POST` | `/api/jobs/claim` | Claims the next due job in the named queues. `200` with `{job, lease_token, lease_expires_at}`, or `204` when nothing is due. |
 | `POST` | `/api/jobs/:id/heartbeat` | Extends the lease. Requires the token. |
 | `POST` | `/api/jobs/:id/complete` | Marks COMPLETED and merges `metadata`. Requires the token. |
 | `POST` | `/api/jobs/:id/fail` | Applies the retry policy, or dead-letters when `retry` is false. Requires the token. |
+| `POST` | `/api/schedules` | Create a schedule from a cron expression and a task template. `400` on an unparseable cron, `409` on a duplicate name. |
+| `GET`  | `/api/schedules` | List schedules with `next_run_at`, `last_run_at`, and `last_job_id`. |
+| `DELETE` | `/api/schedules/:id` | Delete a schedule. Jobs it already enqueued are untouched. |
 
-The last four are the pull protocol (`internal/api/worker.go`), documented for
-worker authors in [WORKERS.md](WORKERS.md). Their request bodies are narrow DTOs
-rather than a `models.Job`, deliberately: `UpdateJob` is a full-row overwrite whose
-fencing predicate is disabled by an empty token, so nothing on a client-input path
-is allowed to reach it. All three token-bearing endpoints return `409 lease_lost`
+`claim`, `heartbeat`, `complete`, and `fail` are the pull protocol
+(`internal/api/worker.go`), documented for worker authors in
+[WORKERS.md](WORKERS.md). Their request bodies are narrow DTOs rather than a
+`models.Job`, deliberately: `UpdateJob` is a full-row overwrite whose fencing
+predicate is disabled by an empty token, so nothing on a client-input path is
+allowed to reach it. All three token-bearing endpoints return `409 lease_lost`
 when the compare-and-swap matches zero rows.
+
+The three `/api/schedules` routes are `internal/api/schedules.go`, a separate
+handler on the same router so they inherit the same middleware and the same
+`APIKeyAuth`. [SCHEDULES.md](SCHEDULES.md) is their contract.
 
 Operational routes live on the root router in `cmd/server/main.go`, outside this
 group and therefore outside auth, so that probes and the Prometheus scrape work
@@ -269,26 +278,52 @@ the jitter factor. `ErrNoRetry` skips remaining attempts for permanent failures.
 
 ### `internal/scheduler`
 Tick-based cron runner with a built-in 5-field parser. No external dependency.
-It handles cron-style scheduled callbacks only.
+It owns no state: every tick reads due rows from the `schedules` table, enqueues
+one job per due schedule through `JobService`, and advances `next_run_at`.
+
+Every instance runs the tick and they all see the same due rows, so all of them
+try to fire. The dedup is two mechanisms already in the tree rather than a new
+one: the idempotency key is derived from the fire instant
+(`sched:<id>:<fire unix>`), so every replica computes the same string and
+`jobs_idempotency_key_idx` collapses them to one job; and the advance is
+conditional on the `next_run_at` the caller read, so exactly one `UPDATE`
+matches. No leader election and no advisory lock. See [SCHEDULES.md](SCHEDULES.md).
 
 ### `internal/reconciler`
 Adaptive Postgres-backed recovery loop.
 It claims due PENDING jobs, submits them to the worker pool, and recovers expired RUNNING leases.
 When the queue is idle, it backs off to a slower polling interval to reduce steady-state database load.
 
+It also owns the two housekeeping passes, each on its own throttle: deleting
+finished jobs past their retention age, and sampling `jobs_backlog`. Both live
+here because the loop already exists and neither needs a goroutine or a
+lifecycle of its own. Neither counts as work for the adaptive interval, so
+pruning old history cannot hold the fast interval open over an idle queue. The
+consequence is that an instance with the reconciler disabled prunes nothing.
+
 ### `internal/metrics`
 Prometheus counters and histograms registered at startup:
 
 | Metric | Type |
 |--------|------|
-| `jobs_enqueued_total` | Counter |
-| `jobs_started_total` | Counter |
-| `jobs_completed_total` | Counter |
-| `jobs_failed_total` | Counter |
-| `jobs_cancelled_total` | Counter |
+| `jobs_enqueued_total` | CounterVec (task) |
+| `jobs_started_total` | CounterVec (task) |
+| `jobs_completed_total` | CounterVec (task) |
+| `jobs_failed_total` | CounterVec (task) |
+| `jobs_cancelled_total` | CounterVec (task) |
 | `worker_in_flight` | Gauge |
-| `job_duration_seconds` | Histogram |
+| `job_duration_seconds` | HistogramVec (task) |
+| `jobs_backlog` | GaugeVec (state) |
 | `http_requests_total` | CounterVec (method/path/status) |
+
+Task names come from callers, so the `task` label would be unbounded cardinality
+on untrusted input. `SetKnownTasks` is called at boot with the registered handler
+set and anything outside it reports as `other` - the same argument the per-task
+circuit breaker already settled, so the two stay consistent. `worker_in_flight`
+stays unlabelled because it describes the pool, not a task.
+
+`jobs_backlog` is database-wide and sampled by every instance, so dashboards
+aggregate it with `max by (state)`, not `sum`.
 
 ### `internal/logger`
 zerolog setup. `WithComponent` adds a `component` field so you can filter by
@@ -382,10 +417,13 @@ Endpoints:
 | `GET  localhost:8080/api/jobs/by-idempotency-key/:key` | Look up by idempotency key |
 | `GET  localhost:8080/api/jobs/:id` | Status |
 | `POST localhost:8080/api/jobs/:id/cancel` | Cancel |
+| `POST localhost:8080/api/jobs/:id/requeue` | Put a DEAD job back to PENDING |
 | `POST localhost:8080/api/jobs/claim` | Claim the next due job (`204` when idle) |
 | `POST localhost:8080/api/jobs/:id/heartbeat` | Extend the lease |
 | `POST localhost:8080/api/jobs/:id/complete` | Report success |
 | `POST localhost:8080/api/jobs/:id/fail` | Report failure |
+| `POST localhost:8080/api/schedules` | Create a recurring schedule |
+| `GET  localhost:8080/api/schedules` | List schedules |
 | `GET  localhost:8080/live` `/ready` `/health` | Probes |
 | `GET  localhost:8080/metrics` | Prometheus |
 | `GET  localhost:9090` | Prometheus UI |
@@ -408,7 +446,7 @@ Conduit/
 │   ├── queue/              # pg_notify listener (default), Kafka client
 │   ├── reconciler/         # Postgres-backed due-job and lease recovery
 │   ├── retry/              # backoff engine
-│   ├── scheduler/          # cron scheduler
+│   ├── scheduler/          # cron parser and the schedules tick
 │   ├── service/            # JobService
 │   └── store/              # Postgres store
 ├── pkg/models/             # shared types

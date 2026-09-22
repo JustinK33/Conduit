@@ -50,7 +50,8 @@ Job Service - same methods, same retry policy
 | **Pluggable execution lock** | `CONDUIT_LOCK=advisory` (default) uses `pg_try_advisory_lock`; `redlock` uses a multi-node Redis quorum; `none` relies on the atomic claim alone. Guards duplicated effort, not correctness. |
 | **Exponential backoff** | Configurable base, multiplier, cap, and jitter |
 | **Circuit breaker** | Closed / Open / Half-Open state machine, one per registered task name plus one shared by unregistered ones, so a dead endpoint stops only its own task |
-| **Cron scheduler** | 5-field cron expressions with `*/n`, ranges, and lists - zero external dependencies |
+| **Cron scheduler** | 5-field cron expressions with `*/n`, ranges, and lists, stored in Postgres and managed over `/api/schedules` - zero external dependencies. Safe on any replica count. See [docs/SCHEDULES.md](docs/SCHEDULES.md). |
+| **Retention** | Completed jobs are pruned after `CONDUIT_RETENTION_COMPLETED` (default seven days); dead-lettered ones are kept forever unless you set an age |
 | **Bounded worker pool** | Semaphore-controlled concurrency with graceful shutdown |
 | **Prometheus metrics** | Counters, gauges, histograms exposed on `/metrics` |
 | **Structured logging** | zerolog JSON logs with service/env/component fields |
@@ -114,10 +115,14 @@ deploy/prometheus/   ← prometheus.yml scrape config
 | `GET` | `/api/jobs/by-idempotency-key/:key` | Fetch the job created for a given idempotency key |
 | `GET` | `/api/jobs/:id` | Fetch job state and timestamps |
 | `POST` | `/api/jobs/:id/cancel` | Cancel a job (transitions to `DEAD`) |
+| `POST` | `/api/jobs/:id/requeue` | Put a `DEAD` job back to `PENDING` with a fresh attempt budget; `409` on any other state |
 | `POST` | `/api/jobs/claim` | Claim the next due job; `200` with `{job, lease_token, lease_expires_at}` or `204` when nothing is due |
 | `POST` | `/api/jobs/:id/heartbeat` | Extend the lease on a claimed job; returns `{lease_expires_at}` |
 | `POST` | `/api/jobs/:id/complete` | Report success; merges `metadata` into the job |
 | `POST` | `/api/jobs/:id/fail` | Report failure; returns `{state, attempt, scheduled_at}` |
+| `POST` | `/api/schedules` | Create a recurring schedule from a cron expression and a task template |
+| `GET` | `/api/schedules` | List schedules with their next and last fire times |
+| `DELETE` | `/api/schedules/:id` | Delete a schedule. Jobs it already enqueued are untouched. |
 | `GET` | `/metrics` | Prometheus scrape endpoint |
 | `GET` | `/live` | Liveness probe (process only) |
 | `GET` | `/ready` | Readiness probe (checks Postgres, plus the Redis quorum when Redlock is on) |
@@ -224,6 +229,11 @@ Every variable Conduit reads is prefixed `CONDUIT_`, and an unprefixed name is i
 | `CONDUIT_TRUSTED_PROXIES` | empty | CIDRs whose `X-Forwarded-For` is believed. Empty trusts nothing and uses the peer address. |
 | `CONDUIT_WORKER_QUEUES` | empty | Queues the in-process pool claims from. Empty means all of them, which competes with remote workers. |
 | `CONDUIT_WORKER_CONCURRENCY` | `8` | Max parallel job executions |
+| `CONDUIT_SCHEDULER_ENABLED` | `true` | Whether this instance fires schedules. Every instance may; the dedup is an idempotency key per fire instant, not a leader election. |
+| `CONDUIT_SCHEDULER_TICK_INTERVAL` | `30s` | How often the schedules table is polled. A schedule is late by at most one tick. |
+| `CONDUIT_RETENTION_COMPLETED` | `168h` | How long completed jobs are kept. `0` keeps them forever. |
+| `CONDUIT_RETENTION_DEAD` | `0` | How long dead-lettered jobs are kept. `0`, the default, keeps them forever. |
+| `CONDUIT_RECONCILER_ENABLED` | `true` | Claims due jobs, requeues expired leases, prunes, and samples `jobs_backlog`. An all-API-only deployment prunes nothing. |
 | `CONDUIT_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `CONDUIT_LOG_PRETTY` | `false` | Human-readable console output |
 
@@ -253,9 +263,9 @@ make bench
 | Test coverage | all packages (`-race` clean) |
 | Infrastructure components | PostgreSQL. Kafka, 3× Redis, Prometheus, and Grafana are optional, behind compose profiles. |
 | Kubernetes manifests | Deployment (with a `migrate` init container), Service, ConfigMap, HPA, Secret template |
-| API endpoints | 9 job routes plus 4 operational |
-| Prometheus metrics | 8 |
-| Cron scheduler | built-in (zero external deps) |
+| API endpoints | 10 job routes, 3 schedule routes, plus 4 operational |
+| Prometheus metrics | 9 |
+| Cron scheduler | built-in (zero external deps), backed by the `schedules` table |
 
 ---
 

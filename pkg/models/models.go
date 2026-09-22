@@ -108,6 +108,27 @@ type Job struct {
 	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
+// Schedule is a recurring job definition: a task template plus a cron
+// expression. Firing one enqueues an ordinary Job, so a scheduled run gets the
+// same retries, leases, and state machine as anything else in the queue.
+//
+// NextRunAt is both the fire instant and the optimistic-concurrency token that
+// keeps replicas from firing the same instant twice. See
+// store.ScheduleStore.AdvanceSchedule.
+type Schedule struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Cron    string `json:"cron"`
+	Task    Task   `json:"task"`
+	Enabled bool   `json:"enabled"`
+
+	NextRunAt time.Time  `json:"next_run_at"`
+	LastRunAt *time.Time `json:"last_run_at,omitempty"`
+	LastJobID string     `json:"last_job_id,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
 type HTTPConfig struct {
 	Address      string
 	ReadTimeout  time.Duration
@@ -169,6 +190,23 @@ type ReconcilerConfig struct {
 	IdleInterval time.Duration
 	BatchSize    int
 	RunningLease time.Duration
+	// BacklogInterval throttles the jobs_backlog gauge sample. Negative disables
+	// it.
+	BacklogInterval time.Duration
+}
+
+// RetentionConfig is how long finished jobs are kept. A zero age means keep
+// forever, which is the only way to say "delete nothing" and has to stay
+// expressible: the DEAD age defaults to it, because a dead-lettered job is the
+// one somebody wants to look at.
+//
+// Sweeping is the reconciler's job, so an instance with the reconciler disabled
+// prunes nothing.
+type RetentionConfig struct {
+	Completed time.Duration
+	Dead      time.Duration
+	Interval  time.Duration
+	BatchSize int
 }
 
 type MetricsConfig struct {
@@ -225,6 +263,7 @@ type Config struct {
 	Worker     WorkerConfig
 	Scheduler  SchedulerConfig
 	Reconciler ReconcilerConfig
+	Retention  RetentionConfig
 	Metrics    MetricsConfig
 	Logger     LoggerConfig
 	Webhook    WebhookConfig

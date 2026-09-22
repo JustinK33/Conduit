@@ -6,12 +6,13 @@ The built-in `sql.etl` task reads a JSON pipeline spec from `task.payload`, vali
 ## Use Case
 
 Use this when an application needs lightweight operational analytics without adopting a full workflow platform.
-For example, an ecommerce service can write raw orders into `raw.orders`, then enqueue a nightly `sql.etl` job that aggregates paid orders into `analytics.daily_revenue`.
+For example, an ecommerce service can write raw orders into `raw.orders`, then create a schedule that aggregates paid orders into `analytics.daily_revenue` at 03:00 every night.
 The queue handles retries, leases, cancellation, backoff, and metrics while Postgres performs the actual extract, transform, and load work.
 
 ## Why This Is Useful
 
 Developers can add reliable data workflows to an existing Go service without running Airflow, Dagster, or a separate scheduler.
+The cron expression lives in Conduit's own `schedules` table, so nothing outside the stack decides when a pipeline runs.
 The system is small enough for product teams but still demonstrates production mechanics that matter in real deployments.
 Those mechanics include idempotent enqueue, durable job state, `FOR UPDATE SKIP LOCKED` claiming, retry backoff, Redis-backed execution locks, and Prometheus metrics.
 
@@ -72,6 +73,35 @@ Check the job and query the target table.
 make list state=COMPLETED
 docker exec -it conduit-postgres-1 psql -U conduit -d conduit -c 'SELECT * FROM analytics.daily_revenue ORDER BY revenue_day;'
 ```
+
+## Making It Nightly
+
+`make enqueue-elt` runs the pipeline once.
+A schedule is what makes it recurring, and it takes the same `task` object:
+
+```bash
+curl -X POST localhost:8080/api/schedules -H 'content-type: application/json' \
+  -d "{\"name\":\"nightly-revenue\",\"cron\":\"0 3 * * *\",\"task\":{\"name\":\"sql.etl\",\"queue\":\"default\",\"timeout\":\"10m\",\"max_retries\":3,\"payload\":$(cat examples/daily_revenue_pipeline.json)}}"
+```
+
+```bash
+curl localhost:8080/api/schedules   # next_run_at is the next 03:00 UTC
+```
+
+Every fired job carries `conduit.schedule` in its metadata, so the run history is one query:
+
+```sql
+SELECT id, state, scheduled_at, completed_at, last_error
+FROM jobs
+WHERE metadata->>'conduit.schedule' = 'nightly-revenue'
+ORDER BY scheduled_at DESC;
+```
+
+The cron expression is UTC, a fire missed while the stack was down is skipped rather than replayed, and running several instances still produces one job per night.
+[../SCHEDULES.md](../SCHEDULES.md) is the full contract.
+
+An aggregate that recomputes the whole table each run is idempotent, so a retry is free.
+One that appends is not, which is what `write_mode: upsert` and `conflict_columns` are for.
 
 ## Resume Story
 

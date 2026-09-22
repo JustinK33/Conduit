@@ -362,13 +362,17 @@ When average CPU across all pods exceeds 70%, Kubernetes adds pods (up to 10). W
 
 ```yaml
 data:
-  CONDUIT_WORKER_CONCURRENCY: "50"
   CONDUIT_TRANSPORT: "postgres"
   CONDUIT_LOCK: "advisory"
+  CONDUIT_WORKER_CONCURRENCY: "8"
+  CONDUIT_SCHEDULER_ENABLED: "true"
+  CONDUIT_RETENTION_COMPLETED: "168h"
   ...
 ```
 
 Non-secret config lives here. Changing a value and re-applying the ConfigMap takes effect on the next pod restart (or immediately if using `envFrom` + a rolling restart).
+
+`deploy/k8s/configmap.yaml` is the full list, and it is the file that owns these defaults - the five above are an excerpt, not a contract. Every replica gets the same ConfigMap, including `CONDUIT_SCHEDULER_ENABLED`: all of them poll the schedules table and all of them race the same fire, which produces one job because the idempotency key is derived from the fire instant. That holds at the ten pods the HPA scales to. See [SCHEDULES.md](SCHEDULES.md).
 
 ---
 

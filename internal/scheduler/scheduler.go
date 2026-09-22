@@ -12,59 +12,65 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Schedule is a parsed cron expression.
 type Schedule interface {
 	Next(time.Time) time.Time
 }
 
-type JobFunc func(context.Context, models.Job) error
+// ScheduleStore is the subset of store.ScheduleStore the loop needs.
+type ScheduleStore interface {
+	DueSchedules(ctx context.Context, now time.Time, limit int) ([]models.Schedule, error)
+	AdvanceSchedule(ctx context.Context, id string, observedNext, next time.Time, lastJobID string) (bool, error)
+}
 
-type Entry struct {
-	Name    string
-	Cron    string
-	Job     models.Job
-	Handler JobFunc
-	Enabled bool
+// Enqueuer is satisfied by *service.JobService. Firing a schedule goes through
+// the same door as POST /api/jobs, so a scheduled run gets the idempotency
+// check, the queue defaulting, and the Kafka nudge for free - and, crucially,
+// the same answer when two replicas fire the same instant.
+type Enqueuer interface {
+	Enqueue(ctx context.Context, job models.Job) (string, error)
+}
+
+// IdempotencyPrefix namespaces the keys the scheduler mints. Callers should not
+// use it for their own enqueues: a collision would make Conduit treat a hand
+// enqueue as a schedule fire that already happened, and silently skip the fire.
+const IdempotencyPrefix = "sched:"
+
+type Config struct {
+	TickInterval time.Duration
+	// FireBudget caps how many schedules one tick fires. It bounds the work a
+	// tick can do, not the number of schedules that exist: anything over budget
+	// is still due on the next tick, because DueSchedules orders by next_run_at.
+	FireBudget int
 }
 
 type Scheduler struct {
-	entries      map[string]Entry
-	schedules    map[string]Schedule
-	lastRun      map[string]time.Time
-	now          func() time.Time
-	tickInterval time.Duration
-	running      bool
-	mu           sync.Mutex
-	wg           sync.WaitGroup
-	cancel       context.CancelFunc
+	schedules ScheduleStore
+	enqueuer  Enqueuer
+	log       zerolog.Logger
+	cfg       Config
+
+	now     func() time.Time
+	running bool
+	mu      sync.Mutex
+	wg      sync.WaitGroup
+	cancel  context.CancelFunc
 }
 
-func New(tickInterval time.Duration) *Scheduler {
-	if tickInterval <= 0 {
-		tickInterval = time.Minute
+func New(cfg Config, schedules ScheduleStore, enqueuer Enqueuer, log zerolog.Logger) *Scheduler {
+	if cfg.TickInterval <= 0 {
+		cfg.TickInterval = 30 * time.Second
+	}
+	if cfg.FireBudget <= 0 {
+		cfg.FireBudget = 5
 	}
 	return &Scheduler{
-		entries:      make(map[string]Entry),
-		schedules:    make(map[string]Schedule),
-		lastRun:      make(map[string]time.Time),
-		now:          time.Now,
-		tickInterval: tickInterval,
+		schedules: schedules,
+		enqueuer:  enqueuer,
+		log:       log,
+		cfg:       cfg,
+		now:       time.Now,
 	}
-}
-
-// Register adds or replaces an entry. Cron expression is validated up front.
-func (s *Scheduler) Register(entry Entry) error {
-	if entry.Name == "" {
-		return fmt.Errorf("scheduler: entry name is required")
-	}
-	sched, err := parseCron(entry.Cron)
-	if err != nil {
-		return fmt.Errorf("scheduler: invalid cron %q: %w", entry.Cron, err)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.entries[entry.Name] = entry
-	s.schedules[entry.Name] = sched
-	return nil
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
@@ -81,7 +87,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		ticker := time.NewTicker(s.tickInterval)
+		ticker := time.NewTicker(s.cfg.TickInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -94,8 +100,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 	}()
 }
 
-// Stop halts the scheduler loop and waits for any dispatched jobs to finish.
-// Safe to call before Start or multiple times.
+// Stop halts the scheduler loop. Safe to call before Start or multiple times.
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
 	if s.cancel != nil {
@@ -107,56 +112,119 @@ func (s *Scheduler) Stop() {
 	s.wg.Wait()
 }
 
-// dispatch fires any entries whose next scheduled time is at or before now.
-// It takes a snapshot of entries under the lock to avoid holding it during dispatch.
+// dispatch fires every schedule whose instant has arrived.
+//
+// Serially, in one goroutine, because firing is two round trips to Postgres and
+// no execution: the work itself happens in a worker after the job is enqueued.
+// A goroutine per fire would buy nothing and make FireBudget a concurrency limit
+// nobody asked for.
 func (s *Scheduler) dispatch(ctx context.Context) {
-	now := s.now()
-
-	type candidate struct {
-		entry   Entry
-		sched   Schedule
-		lastRun time.Time
+	if s.schedules == nil || s.enqueuer == nil {
+		return
 	}
+	now := s.now().UTC()
 
-	s.mu.Lock()
-	candidates := make([]candidate, 0, len(s.entries))
-	for name, entry := range s.entries {
-		candidates = append(candidates, candidate{
-			entry:   entry,
-			sched:   s.schedules[name],
-			lastRun: s.lastRun[name],
-		})
+	due, err := s.schedules.DueSchedules(ctx, now, s.cfg.FireBudget)
+	if err != nil {
+		s.log.Error().Err(err).Msg("scheduler: failed to read due schedules")
+		return
 	}
-	s.mu.Unlock()
-
-	for _, c := range candidates {
-		if !c.entry.Enabled || c.sched == nil {
-			continue
+	for _, sched := range due {
+		if ctx.Err() != nil {
+			return
 		}
-		next := c.sched.Next(c.lastRun)
-		if next.IsZero() || now.Before(next) {
-			continue
-		}
-
-		s.mu.Lock()
-		s.lastRun[c.entry.Name] = now
-		s.mu.Unlock()
-
-		s.wg.Add(1)
-		go func(e Entry) {
-			defer s.wg.Done()
-			if e.Handler == nil {
-				return
-			}
-			if err := e.Handler(ctx, e.Job); err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).Str("entry", e.Name).Msg("scheduled job failed")
-			}
-		}(c.entry)
+		s.fire(ctx, sched, now)
 	}
 }
 
-// parseCron parses a standard 5-field cron expression: minute hour dom month dow.
-func parseCron(expr string) (Schedule, error) {
+// fire enqueues one run of a schedule and then advances it.
+//
+// The order matters both ways round. Enqueue first, so a crash in between
+// re-fires the same instant on the next tick, where the idempotency key absorbs
+// the duplicate: at worst one extra no-op enqueue. Advance last and
+// conditionally, so of N replicas that all saw this schedule as due, exactly one
+// wins the advance and the rest find their observed next_run_at gone.
+func (s *Scheduler) fire(ctx context.Context, sched models.Schedule, now time.Time) {
+	log := s.log.With().Str("schedule_id", sched.ID).Str("schedule", sched.Name).Logger()
+
+	cron, err := Parse(sched.Cron)
+	if err != nil {
+		// Unreachable through the API, which parses before insert. Reachable by
+		// hand-editing the table, and disabling the row is better than failing
+		// this way every tick forever.
+		log.Error().Err(err).Str("cron", sched.Cron).Msg("scheduler: schedule has an unparseable cron expression; not firing")
+		return
+	}
+
+	fireAt := sched.NextRunAt.UTC()
+	next, skipped := nextAfter(cron, fireAt, now)
+	if next.IsZero() {
+		log.Error().Str("cron", sched.Cron).Msg("scheduler: cron expression has no next occurrence; not firing")
+		return
+	}
+
+	job := models.Job{
+		// The fire instant, not the wall clock, is what makes this key stable
+		// across replicas: they all read the same next_run_at.
+		IdempotencyKey: fmt.Sprintf("%s%s:%d", IdempotencyPrefix, sched.ID, fireAt.Unix()),
+		Task:           sched.Task,
+		ScheduledAt:    &fireAt,
+		Metadata: map[string]string{
+			"conduit.schedule_id": sched.ID,
+			"conduit.schedule":    sched.Name,
+		},
+	}
+
+	jobID, err := s.enqueuer.Enqueue(ctx, job)
+	if err != nil {
+		// Do not advance. The schedule stays due and the next tick tries again.
+		log.Error().Err(err).Msg("scheduler: failed to enqueue scheduled run")
+		return
+	}
+
+	advanced, err := s.schedules.AdvanceSchedule(ctx, sched.ID, sched.NextRunAt, next, jobID)
+	if err != nil {
+		log.Error().Err(err).Msg("scheduler: failed to advance schedule")
+		return
+	}
+	if !advanced {
+		// Another replica got there first. Normal, and the common case once more
+		// than one instance is running, so debug rather than warn.
+		log.Debug().Msg("scheduler: another instance advanced this schedule")
+		return
+	}
+
+	event := log.Info().Str("job_id", jobID).Time("fired_for", fireAt).Time("next_run_at", next)
+	if skipped > 0 {
+		event = event.Int("skipped_occurrences", skipped)
+	}
+	event.Msg("scheduler: fired schedule")
+}
+
+// nextAfter returns the first occurrence strictly after now, and how many
+// occurrences between from and now it stepped over.
+//
+// Missed occurrences are skipped, not replayed. A deployment that was down for a
+// day should not wake up and run twenty-four hourly aggregates back to back;
+// almost nobody who writes a recurring job wants the backlog, and the ones who
+// do want it want it ordered and rate-limited, which is a different feature.
+func nextAfter(cron Schedule, from, now time.Time) (time.Time, int) {
+	// ponytail: one Next call per missed occurrence. A minutely schedule left a
+	// year behind costs ~500k calls at ~250 ns, so well under a second, once.
+	// Solve arithmetically only if a pathological expression ever shows up.
+	skipped := 0
+	next := cron.Next(from)
+	for !next.IsZero() && !next.After(now) {
+		next = cron.Next(next)
+		skipped++
+	}
+	return next, skipped
+}
+
+// Parse parses a standard 5-field cron expression: minute hour dom month dow.
+// Exported so the API can reject an invalid expression at create time rather
+// than at fire time.
+func Parse(expr string) (Schedule, error) {
 	fields := strings.Fields(expr)
 	if len(fields) != 5 {
 		return nil, fmt.Errorf("expected 5 fields, got %d", len(fields))
@@ -229,7 +297,7 @@ func parseField(expr string, min, max int) ([]bool, error) {
 		default:
 			n, err := strconv.Atoi(part)
 			if err != nil || n < min || n > max {
-				return nil, fmt.Errorf("invalid value %q (allowed %d–%d)", part, min, max)
+				return nil, fmt.Errorf("invalid value %q (allowed %d-%d)", part, min, max)
 			}
 			result[n-min] = true
 		}
@@ -240,8 +308,8 @@ func parseField(expr string, min, max int) ([]bool, error) {
 
 // cronSchedule holds pre-computed membership sets for each cron field.
 type cronSchedule struct {
-	minutes [60]bool // 0–59
-	hours   [24]bool // 0–23
+	minutes [60]bool // 0-59
+	hours   [24]bool // 0-23
 	doms    [31]bool // index 0 = day 1
 	months  [12]bool // index 0 = January
 	dows    [7]bool  // 0 = Sunday

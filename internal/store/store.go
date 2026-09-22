@@ -30,9 +30,10 @@ type JobStore interface {
 	RenewLease(context.Context, models.Job, time.Duration) error
 	RequeueExpiredRunning(context.Context, int) (int, error)
 	ReleaseClaim(context.Context, models.Job, string, time.Duration) error
-	CompleteClaimedJob(context.Context, string, string, map[string]string) error
+	CompleteClaimedJob(context.Context, string, string, map[string]string) (models.Job, error)
 	FailClaimedJob(context.Context, string, string, string, *time.Time) error
 	ListJobs(context.Context, ListFilter) ([]models.Job, string, error)
+	RequeueDeadJob(context.Context, string) error
 }
 
 // ListFilter narrows a ListJobs call. State is optional - empty string means
@@ -357,6 +358,117 @@ func (s *PostgresStore) RequeueExpiredRunning(ctx context.Context, limit int) (i
 	return int(tag.RowsAffected()), nil
 }
 
+// RequeueDeadJob moves a dead-lettered job back to PENDING with a fresh attempt
+// budget. It is the deliberate exception to CanTransition, which makes DEAD
+// terminal and stays that way: no automatic path resurrects a job, because a job
+// that exhausted its retries will exhaust them again unless a person changed
+// something. This method is that person saying they did.
+//
+// WHERE state = 'DEAD' is what keeps it safe. A RUNNING job cannot be yanked out
+// from under the worker holding its lease, and a COMPLETED one cannot be re-run,
+// so the guard is the reason this does not need the lease token.
+func (s *PostgresStore) RequeueDeadJob(ctx context.Context, id string) error {
+	query := fmt.Sprintf(`
+		UPDATE %s
+		SET state = 'PENDING',
+			attempt = 0,
+			task_retry_count = 0,
+			scheduled_at = NOW(),
+			started_at = NULL,
+			lease_expires_at = NULL,
+			lease_token = NULL,
+			completed_at = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+		  AND state = 'DEAD'`, s.TableName)
+
+	tag, err := s.Pool.Exec(ctx, query, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Absent and not-DEAD are two different answers, and the caller returns a
+		// different status code for each, so pay for one extra read on what is a
+		// human-driven path anyway.
+		if _, err := s.GetJob(ctx, id); err != nil {
+			return err
+		}
+		return ErrInvalidTransition
+	}
+	return nil
+}
+
+// DeleteFinished removes terminal jobs whose completed_at is older than before,
+// oldest first, at most limit per call. Bounded rather than a single unbounded
+// DELETE, because the first sweep of a table nobody has ever pruned would hold
+// row locks over millions of rows and block the claim path it is meant to keep
+// fast. The caller loops.
+//
+// state must be COMPLETED or DEAD; anything else is a caller bug and returns an
+// error rather than deleting live work.
+func (s *PostgresStore) DeleteFinished(ctx context.Context, state models.JobState, before time.Time, limit int) (int, error) {
+	if state != models.JobStateCompleted && state != models.JobStateDead {
+		return 0, fmt.Errorf("store: refusing to delete jobs in state %s", state)
+	}
+	if limit <= 0 {
+		return 0, nil
+	}
+
+	query := fmt.Sprintf(`
+		DELETE FROM %s
+		WHERE id IN (
+			SELECT id FROM %s
+			WHERE state = $1
+			  AND completed_at IS NOT NULL
+			  AND completed_at < $2
+			ORDER BY completed_at ASC
+			LIMIT $3
+		)`, s.TableName, s.TableName)
+
+	tag, err := s.Pool.Exec(ctx, query, string(state), before, limit)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// BacklogStates are the three states the backlog gauge reports: work waiting,
+// work in flight, and work that gave up. FAILED is omitted because it is the
+// momentary state between a failed attempt and the retry, so a sample of it
+// reads as noise.
+var BacklogStates = []models.JobState{
+	models.JobStatePending,
+	models.JobStateRunning,
+	models.JobStateDead,
+}
+
+// CountByState answers the only question anyone asks about a queue: is it
+// keeping up.
+//
+// Three scalar subqueries rather than one GROUP BY, because each one is a
+// partial index the schema already carries - jobs_pending_idx,
+// jobs_running_lease_idx, and jobs_dead_retention_idx from migration 005 - while
+// a GROUP BY over every state has to read COMPLETED too, which is the one bucket
+// that grows without bound between retention passes. This runs on a timer
+// forever, so it must not get slower as history accumulates.
+func (s *PostgresStore) CountByState(ctx context.Context) (map[models.JobState]int64, error) {
+	query := fmt.Sprintf(`
+		SELECT
+			(SELECT COUNT(*) FROM %[1]s WHERE state = 'PENDING'),
+			(SELECT COUNT(*) FROM %[1]s WHERE state = 'RUNNING'),
+			(SELECT COUNT(*) FROM %[1]s WHERE state = 'DEAD')`, s.TableName)
+
+	var pending, running, dead int64
+	if err := s.Pool.QueryRow(ctx, query).Scan(&pending, &running, &dead); err != nil {
+		return nil, err
+	}
+	return map[models.JobState]int64{
+		models.JobStatePending: pending,
+		models.JobStateRunning: running,
+		models.JobStateDead:    dead,
+	}, nil
+}
+
 // ReleaseClaim hands a claimed job back for the cases where nothing was tried:
 // the circuit is open, or another instance holds the execution lock.
 //
@@ -400,9 +512,15 @@ func (s *PostgresStore) ReleaseClaim(ctx context.Context, job models.Job, reason
 	return nil
 }
 
-func (s *PostgresStore) CompleteClaimedJob(ctx context.Context, id, leaseToken string, meta map[string]string) error {
+// CompleteClaimedJob marks a claimed job COMPLETED and returns the row it wrote.
+//
+// RETURNING rather than a bare Exec, so a caller that needs anything about the
+// job it just completed - the task name for a metric label, the merged metadata -
+// gets it in the same round trip. Symmetric with FailClaimedJob's caller, which
+// already hands the finished job back.
+func (s *PostgresStore) CompleteClaimedJob(ctx context.Context, id, leaseToken string, meta map[string]string) (models.Job, error) {
 	if leaseToken == "" {
-		return ErrInvalidTransition
+		return models.Job{}, ErrInvalidTransition
 	}
 
 	metaBytes := []byte("{}")
@@ -410,7 +528,7 @@ func (s *PostgresStore) CompleteClaimedJob(ctx context.Context, id, leaseToken s
 		var err error
 		metaBytes, err = json.Marshal(meta)
 		if err != nil {
-			return fmt.Errorf("store: marshal metadata: %w", err)
+			return models.Job{}, fmt.Errorf("store: marshal metadata: %w", err)
 		}
 	}
 
@@ -432,16 +550,23 @@ func (s *PostgresStore) CompleteClaimedJob(ctx context.Context, id, leaseToken s
 				THEN metadata ELSE '{}'::jsonb END || $1::jsonb
 		WHERE id = $2
 		  AND state = 'RUNNING'
-		  AND lease_token = $3`, s.TableName)
+		  AND lease_token = $3
+		RETURNING
+			id, idempotency_key, task_id, task_name, task_payload,
+			task_retry_count, task_max_retries, task_timeout_ns,
+			task_cron_expr, task_queue, task_metadata,
+			state, attempt, last_error,
+			scheduled_at, started_at, lease_expires_at, lease_token, completed_at,
+			created_at, updated_at, metadata`, s.TableName)
 
-	tag, err := s.Pool.Exec(ctx, query, metaBytes, id, leaseToken)
+	job, err := scanJob(ctx, s.Pool.QueryRow(ctx, query, metaBytes, id, leaseToken))
 	if err != nil {
-		return err
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.Job{}, ErrLeaseLost
+		}
+		return models.Job{}, err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrLeaseLost
-	}
-	return nil
+	return job, nil
 }
 
 func (s *PostgresStore) FailClaimedJob(ctx context.Context, id, leaseToken, errMsg string, nextRun *time.Time) error {

@@ -299,9 +299,20 @@ func TestCompleteClaimedJob(t *testing.T) {
 				t.Fatalf("setup claim: %v", err)
 			}
 
-			err = s.CompleteClaimedJob(ctx, id, tc.callToken, tc.meta)
+			returned, err := s.CompleteClaimedJob(ctx, id, tc.callToken, tc.meta)
 			if err != tc.wantErr {
 				t.Fatalf("CompleteClaimedJob: got error %v, want %v", err, tc.wantErr)
+			}
+
+			if tc.wantErr == nil {
+				// The returned row is what the caller labels its metric from, so it
+				// has to be the job that was actually written.
+				if returned.ID != id {
+					t.Errorf("returned job ID = %q, want %q", returned.ID, id)
+				}
+				if returned.State != models.JobStateCompleted {
+					t.Errorf("returned state = %s, want COMPLETED", returned.State)
+				}
 			}
 
 			if tc.wantErr == nil {

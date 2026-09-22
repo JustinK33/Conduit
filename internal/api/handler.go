@@ -22,7 +22,7 @@ type Queue interface {
 	Cancel(context.Context, string) error
 	Claim(ctx context.Context, queues []string, lease time.Duration) (models.Job, error)
 	Heartbeat(ctx context.Context, id, leaseToken string, lease time.Duration) (time.Time, error)
-	Complete(ctx context.Context, id, leaseToken string, meta map[string]string) error
+	Complete(ctx context.Context, id, leaseToken string, meta map[string]string) (models.Job, error)
 	Fail(ctx context.Context, id, leaseToken, errMsg string, permanent bool) (models.Job, error)
 }
 
@@ -66,6 +66,7 @@ func (h *Handler) RegisterRoutes(router gin.IRouter) {
 	g.POST("/claim", h.ClaimJob)
 	g.GET("/:id", h.GetJobStatus)
 	g.POST("/:id/cancel", h.CancelJob)
+	g.POST("/:id/requeue", h.RequeueJob)
 	g.POST("/:id/heartbeat", h.HeartbeatJob)
 	g.POST("/:id/complete", h.CompleteJob)
 	g.POST("/:id/fail", h.FailJob)
@@ -110,7 +111,7 @@ func (h *Handler) EnqueueJob(c *gin.Context) {
 		return
 	}
 
-	h.Metrics.JobEnqueued.Inc()
+	h.Metrics.IncJobEnqueued(job.Task.Name)
 	c.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
@@ -202,6 +203,20 @@ func (h *Handler) CancelJob(c *gin.Context) {
 	log := zerolog.Ctx(c.Request.Context())
 	id := c.Param("id")
 
+	// Read first, for the task name the cancelled counter is labelled by. A
+	// cancel is a human pressing a button, so one extra primary-key lookup is
+	// free here in a way it would not be on the claim path.
+	job, err := h.Store.GetJob(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrJobNotFound) {
+			RespondError(c, http.StatusNotFound, "not_found", "job not found")
+			return
+		}
+		log.Error().Err(err).Str("job_id", id).Msg("cancel lookup failed")
+		RespondError(c, http.StatusInternalServerError, "internal_error", "failed to cancel job")
+		return
+	}
+
 	if err := h.Queue.Cancel(c.Request.Context(), id); err != nil {
 		if errors.Is(err, store.ErrJobNotFound) {
 			RespondError(c, http.StatusNotFound, "not_found", "job not found")
@@ -216,6 +231,34 @@ func (h *Handler) CancelJob(c *gin.Context) {
 		return
 	}
 
-	h.Metrics.JobCancelled.Inc()
+	h.Metrics.IncJobCancelled(job.Task.Name)
 	c.JSON(http.StatusOK, gin.H{"status": "cancelled"})
+}
+
+// RequeueJob puts a dead-lettered job back in the queue with a fresh attempt
+// budget. It is the one endpoint that resurrects a job, and it exists so that
+// recovering from a bad deploy does not mean opening psql.
+//
+// Only DEAD is requeueable. A RUNNING job has a worker holding its lease and a
+// COMPLETED one already succeeded, so both get 409 rather than a silent no-op.
+func (h *Handler) RequeueJob(c *gin.Context) {
+	log := zerolog.Ctx(c.Request.Context())
+	id := c.Param("id")
+
+	if err := h.Store.RequeueDeadJob(c.Request.Context(), id); err != nil {
+		if errors.Is(err, store.ErrJobNotFound) {
+			RespondError(c, http.StatusNotFound, "not_found", "job not found")
+			return
+		}
+		if errors.Is(err, store.ErrInvalidTransition) {
+			RespondError(c, http.StatusConflict, "invalid_state", "only a DEAD job can be requeued")
+			return
+		}
+		log.Error().Err(err).Str("job_id", id).Msg("requeue failed")
+		RespondError(c, http.StatusInternalServerError, "internal_error", "failed to requeue job")
+		return
+	}
+
+	log.Info().Str("job_id", id).Msg("dead job requeued")
+	c.JSON(http.StatusOK, gin.H{"state": models.JobStatePending, "attempt": 0})
 }

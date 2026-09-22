@@ -10,6 +10,9 @@ Postgres is the only place a job's fate is written, and a fencing token bounds t
 
 You POST a job, Conduit runs it, and it keeps running it across process crashes, broker restarts, and handler failures without anyone watching.
 
+A job can be one-off or recurring.
+`POST /api/schedules` stores a cron expression and a task template in Postgres, and every instance polls that table, so recurring work needs no second process and no leader election: see [docs/SCHEDULES.md](docs/SCHEDULES.md).
+
 Your code runs it one of two ways.
 Either a worker you write in any language claims jobs over HTTP and reports the outcome back, which is the pull API in [docs/WORKERS.md](docs/WORKERS.md), or you use one of the two handlers that ship in-process: `webhook` for outbound HTTP delivery and `sql.etl` for Postgres-to-Postgres pipelines defined in JSON.
 A remote worker gets the same lease, the same fencing token, and the same retry policy as an in-process one, because both paths write through the same code.
@@ -122,6 +125,28 @@ make ready                                     # per-dependency readiness
 `/live` always returns 200 and is what the Kubernetes liveness probe uses. `/ready` pings Postgres, plus the Redis quorum when Redlock is on, and returns 503 with per-dependency detail, which is what gates traffic.
 
 `make enqueue-elt` runs the SQL pipeline example, and needs the demo tables from `migrations/002_create_elt_demo.sql`.
+
+### Make it recurring
+
+```bash
+curl -X POST localhost:8080/api/schedules -H 'content-type: application/json' \
+  -d '{"name":"nightly-revenue","cron":"0 3 * * *","task":{"name":"sql.etl","timeout":"10m","payload":{"source_table":"raw.orders","target_table":"analytics.daily_revenue"}}}'
+
+curl localhost:8080/api/schedules     # next_run_at, last_run_at, last_job_id
+```
+
+Cron runs in UTC, missed fires are skipped rather than replayed, and running ten replicas still produces one job per fire instant.
+[docs/SCHEDULES.md](docs/SCHEDULES.md) is the contract: supported syntax, the reserved `sched:` idempotency prefix, and how the dedup works.
+
+### Operate it
+
+```bash
+curl -X POST localhost:8080/api/jobs/$ID/requeue   # a DEAD job back to PENDING
+```
+
+Completed jobs are pruned after seven days by default (`CONDUIT_RETENTION_COMPLETED=0` keeps them forever), and `conduit_server_jobs_backlog{state}` answers whether the queue is keeping up.
+The job counters carry a `task` label bounded to the registered handlers plus `other`.
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) has the PromQL and the retention knobs.
 
 ### Run your own worker
 
@@ -309,7 +334,7 @@ Run 3's blank is a sampling artifact, not a failure: the poller counts `RUNNING`
 | Backoff with jitter | 6.87 ns/op |
 | Pool dispatch | 733 ns/op, 1,363,948 jobs/s, 2 allocs |
 | Pool submit, contended | 3,395 ns/op, 294,517 jobs/s |
-| Cron parse | 211 - 303 ns/op, 12 - 14 allocs |
+| Cron parse | 195 - 294 ns/op, 12 - 14 allocs |
 
 The pool can move 1.4 million jobs/s and the system drains 530.
 Nothing in Go is the bottleneck here; the network round trips and the dispatch configuration are.
@@ -379,6 +404,7 @@ I built all three because I wanted to know exactly what each one cost, and now t
 
 - [docs/decisions/](docs/decisions/) is seven decision records with a column for the uncomfortable part of each: Postgres as the source of truth, Kafka as transport only, Redlock over advisory locks, leases instead of Kafka redelivery, the webhook execution model, workers pulling over HTTP instead of importing an SDK, and a strict wire contract that breaks every older client on purpose.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the reference: system diagram, job state machine, and a package-by-package breakdown.
+- [docs/SCHEDULES.md](docs/SCHEDULES.md) is recurring work: the cron syntax and the one place it deviates from Vixie cron, why everything is UTC, why a missed fire is skipped rather than replayed, and how ten replicas racing the same fire produce one job.
 - [docs/WORKERS.md](docs/WORKERS.md) is how you write a worker: the four endpoints, the lease and heartbeat contract, what to do when you lose a lease, and the exact request and response shapes.
 - [docs/UPGRADING.md](docs/UPGRADING.md) is what to change per release. v0.2.0 broke the wire format, including the outbound webhook envelope, so a v0.1.0 client and any endpoint receiving Conduit webhooks both need a change.
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is the reverse proxy recipe, in Caddy and nginx, and why one is not optional: Conduit has no TLS and four endpoints that are deliberately unauthenticated.

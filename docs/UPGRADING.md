@@ -1,5 +1,63 @@
 # Upgrading
 
+## v0.3.1 to v0.4.0
+
+No wire change and no breaking change to any existing request or response.
+A v0.2.0 client still works unmodified.
+Four things to do, and the first one deletes data.
+
+**1. Retention is on by default and it deletes completed jobs.**
+
+`CONDUIT_RETENTION_COMPLETED` defaults to `168h`, so seven days after upgrading, completed jobs older than a week start disappearing.
+Set `CONDUIT_RETENTION_COMPLETED=0` before you roll out if you want the old behaviour of keeping everything, or if you are shipping job history somewhere that reads it out of Postgres.
+
+Dead-lettered jobs are **not** deleted: `CONDUIT_RETENTION_DEAD` defaults to `0`, which means keep forever, because a `DEAD` job is the one somebody wants to read.
+
+The sweep runs on the reconciler, so an instance with `CONDUIT_RECONCILER_ENABLED=false` prunes nothing.
+A deployment where every instance is API-only never prunes at all.
+[DEPLOYMENT.md](DEPLOYMENT.md#retention) has all four knobs.
+
+**2. Run the migrations.**
+
+`migrations/004_create_schedules.sql` and `migrations/005_retention_indexes.sql`.
+Both are additive.
+Compose and the Kubernetes init container run `conduit migrate` for you; by hand it is `./bin/conduit migrate` or `docker run --rm ghcr.io/justink33/conduit:v0.4.0 migrate`.
+
+The server does not check for the schedules table at boot, so an unmigrated database fails on the first `/api/schedules` call rather than at startup.
+
+**3. PromQL over the job counters needs an aggregation now.**
+
+The five job counters carry a `task` label, and `job_duration_seconds` is a histogram with one too.
+A query that was `rate(conduit_server_jobs_failed_total[5m])` now returns one series per task instead of one series, so anything that graphed or alerted on it needs `sum(...)`:
+
+```promql
+# before
+rate(conduit_server_jobs_failed_total[5m])
+# after
+sum(rate(conduit_server_jobs_failed_total[5m]))
+# or, which is the reason for the label
+sum by (task) (rate(conduit_server_jobs_failed_total[5m]))
+```
+
+The label is bounded to the task names with a registered handler, plus `other`.
+A task name Conduit has no handler for reports as `other` rather than as itself, because the label is fed by caller input.
+
+`worker_in_flight` is unchanged and still unlabelled.
+The new `conduit_server_jobs_backlog{state}` is database-wide and sampled by every instance, so aggregate it with `max by (state)` and never `sum`.
+
+**4. `CONDUIT_SCHEDULER_MAX_CONCURRENT_RUNS` means something different.**
+
+It used to bound goroutines in a scheduler that fired nothing.
+It is now the per-tick fire budget: how many due schedules one tick will enqueue.
+The default moved from `2` to `5`, and `CONDUIT_SCHEDULER_TICK_INTERVAL` from `1m` to `30s`.
+If you set either explicitly, re-read [SCHEDULES.md](SCHEDULES.md#what-due-means) before keeping your value.
+
+Nothing was firing before this release, so there is no behaviour to preserve: `internal/scheduler` was constructed, started, and reachable by nothing.
+Recurring work now means `POST /api/schedules`.
+
+Rolling back to v0.3.1 works: both migrations are additive, and old code ignores the `schedules` table.
+Jobs already enqueued by a schedule are ordinary jobs and finish normally.
+
 ## v0.2.0 to v0.3.1
 
 Nothing to change. No wire change, no database migration, and a v0.2.0 client works unmodified.

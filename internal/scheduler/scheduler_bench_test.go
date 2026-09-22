@@ -23,7 +23,7 @@ func BenchmarkParseCron(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				_, _ = parseCron(tc.expr)
+				_, _ = Parse(tc.expr)
 			}
 		})
 	}
@@ -32,7 +32,7 @@ func BenchmarkParseCron(b *testing.B) {
 // BenchmarkCronNext measures schedule evaluation (zero allocations target).
 func BenchmarkCronNext(b *testing.B) {
 	for _, tc := range benchExpressions {
-		sched, _ := parseCron(tc.expr)
+		sched, _ := Parse(tc.expr)
 		now := time.Now()
 
 		b.Run(tc.name, func(b *testing.B) {
@@ -47,7 +47,7 @@ func BenchmarkCronNext(b *testing.B) {
 
 // BenchmarkCronNextSequential simulates the scheduler tick: 100 consecutive Next() calls.
 func BenchmarkCronNextSequential(b *testing.B) {
-	sched, _ := parseCron("*/5 * * * *")
+	sched, _ := Parse("*/5 * * * *")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

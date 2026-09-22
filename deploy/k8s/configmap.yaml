@@ -34,6 +34,19 @@ data:
   CONDUIT_RECONCILER_IDLE_INTERVAL: "15s"
   CONDUIT_RECONCILER_BATCH_SIZE: "500"
   CONDUIT_RECONCILER_RUNNING_LEASE: "5m"
+  CONDUIT_RECONCILER_BACKLOG_INTERVAL: "10s"
+  # Every replica polls the schedules table and they all race the same fire; one
+  # idempotency key per fire instant collapses that to one job. Safe at any
+  # replica count, including the ten hpa.yaml scales to. See docs/SCHEDULES.md.
+  CONDUIT_SCHEDULER_ENABLED: "true"
+  CONDUIT_SCHEDULER_TICK_INTERVAL: "30s"
+  CONDUIT_SCHEDULER_MAX_CONCURRENT_RUNS: "5"
+  # Retention runs on the reconciler. 0 keeps that state forever; a DEAD job is
+  # the one you investigate, so it is never pruned unless you set an age.
+  CONDUIT_RETENTION_COMPLETED: "168h"
+  CONDUIT_RETENTION_DEAD: "0"
+  CONDUIT_RETENTION_INTERVAL: "1h"
+  CONDUIT_RETENTION_BATCH_SIZE: "1000"
   CONDUIT_WEBHOOK_TIMEOUT: "10s"
   CONDUIT_WEBHOOK_MAX_REDIRECTS: "0"
   CONDUIT_WEBHOOK_ALLOW_PRIVATE_NETWORKS: "false"

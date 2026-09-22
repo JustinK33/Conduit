@@ -53,10 +53,10 @@ type fakeOutcome struct {
 	failErr         error
 }
 
-func (f *fakeOutcome) Complete(_ context.Context, _, leaseToken string, _ map[string]string) error {
+func (f *fakeOutcome) Complete(_ context.Context, id, leaseToken string, _ map[string]string) (models.Job, error) {
 	f.completeCalls++
 	f.completeToken = leaseToken
-	return nil
+	return models.Job{ID: id, State: models.JobStateCompleted}, nil
 }
 
 func (f *fakeOutcome) Fail(_ context.Context, _, leaseToken, errMsg string, permanent bool) (models.Job, error) {

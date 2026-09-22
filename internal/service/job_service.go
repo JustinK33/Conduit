@@ -128,15 +128,18 @@ func (s *JobService) Heartbeat(ctx context.Context, id, leaseToken string, lease
 	return time.Now().UTC().Add(d), nil
 }
 
-// Complete marks a job COMPLETED, merging meta into the job's metadata.
-func (s *JobService) Complete(ctx context.Context, id, leaseToken string, meta map[string]string) error {
-	if err := s.store.CompleteClaimedJob(ctx, id, leaseToken, meta); err != nil {
+// Complete marks a job COMPLETED, merging meta into the job's metadata, and
+// returns the finished job. The caller gets it from the same statement that did
+// the write, which is what keeps a per-task metric off a second read.
+func (s *JobService) Complete(ctx context.Context, id, leaseToken string, meta map[string]string) (models.Job, error) {
+	job, err := s.store.CompleteClaimedJob(ctx, id, leaseToken, meta)
+	if err != nil {
 		if errors.Is(err, store.ErrLeaseLost) {
-			return err
+			return models.Job{}, err
 		}
-		return fmt.Errorf("service: complete job %s: %w", id, err)
+		return models.Job{}, fmt.Errorf("service: complete job %s: %w", id, err)
 	}
-	return nil
+	return job, nil
 }
 
 // Fail applies the retry policy to a failed job and writes the outcome in a

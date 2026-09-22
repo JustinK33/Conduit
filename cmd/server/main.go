@@ -133,6 +133,7 @@ func run(ctx context.Context) error {
 	log.Info().Str("transport", cfg.Transport).Str("lock", cfg.Lock).Msg("dispatch configured")
 
 	jobStore := store.NewPostgresStore(pgPool, "jobs")
+	scheduleStore := store.NewScheduleStore(pgPool, store.DefaultSchedulesTable)
 
 	// Redis exists for one reason, Redlock, so it is only dialled when Redlock is
 	// what was asked for. An advisory lock is a Postgres session lock, and it
@@ -204,6 +205,16 @@ func run(ctx context.Context) error {
 	}
 	handlers := defaultHandlers(cfg.Webhook, pgPool)
 
+	// Bound the task label on every job metric to the handler table, the same
+	// set newTaskBreakers is built from. Task names come from callers, so an
+	// unfiltered label is unbounded cardinality on untrusted input; anything
+	// outside this set reports as "other".
+	knownTasks := make([]string, 0, len(handlers))
+	for name := range handlers {
+		knownTasks = append(knownTasks, name)
+	}
+	reg.SetKnownTasks(knownTasks)
+
 	retryEngine := retry.NewEngine(retry.Config{
 		BaseDelay:   time.Second,
 		MaxDelay:    30 * time.Second,
@@ -241,6 +252,14 @@ func run(ctx context.Context) error {
 		// respect the same queue filter. Without this it would win jobs meant
 		// for remote workers and dead-letter them for having no handler.
 		Queues: cfg.Worker.Queues,
+		Retention: reconciler.RetentionConfig{
+			Completed: cfg.Retention.Completed,
+			Dead:      cfg.Retention.Dead,
+			Interval:  cfg.Retention.Interval,
+			BatchSize: cfg.Retention.BatchSize,
+		},
+		BacklogInterval: cfg.Reconciler.BacklogInterval,
+		Metrics:         reg,
 	}, jobStore, workerPool, logger.WithComponent(log, "reconciler"))
 	if cfg.Reconciler.Enabled {
 		jobReconciler.Start(ctx)
@@ -282,9 +301,17 @@ func run(ctx context.Context) error {
 		log.Warn().Msg("CONDUIT_RECONCILER_ENABLED=false with the postgres transport: this instance dispatches nothing to its own worker pool")
 	}
 
-	sched := scheduler.New(cfg.Scheduler.TickInterval)
+	sched := scheduler.New(scheduler.Config{
+		TickInterval: cfg.Scheduler.TickInterval,
+		FireBudget:   cfg.Scheduler.MaxConcurrentRuns,
+	}, scheduleStore, jobSvc, logger.WithComponent(log, "scheduler"))
 	if cfg.Scheduler.Enabled {
 		sched.Start(ctx)
+	} else {
+		// Schedules are rows, so they survive this being off. Nothing fires them
+		// until an instance with the scheduler enabled is running, and then it
+		// skips what it missed rather than replaying it.
+		log.Warn().Msg("CONDUIT_SCHEDULER_ENABLED=false: this instance fires no schedules")
 	}
 	defer sched.Stop()
 
@@ -311,6 +338,9 @@ func run(ctx context.Context) error {
 
 	handler := api.NewHandler(jobSvc, jobStore, logger.WithComponent(log, "api"), reg, cfg.HTTP.APIKeys)
 	handler.RegisterRoutes(router)
+	// Its own handler with its own routes, mounted on the same router so it
+	// inherits the middleware stack and the same API key auth.
+	api.NewScheduleHandler(scheduleStore, logger.WithComponent(log, "api"), cfg.HTTP.APIKeys).RegisterRoutes(router)
 	router.GET("/metrics", gin.WrapH(reg.Handler()))
 	router.GET("/live", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -376,7 +406,7 @@ func defaultHandlers(cfg models.WebhookConfig, pgPool *pgxpool.Pool) map[string]
 // so that a job executed in this process and a job executed by a remote worker
 // produce identical state transitions. The retry decision lives behind Fail.
 type jobOutcome interface {
-	Complete(ctx context.Context, id, leaseToken string, meta map[string]string) error
+	Complete(ctx context.Context, id, leaseToken string, meta map[string]string) (models.Job, error)
 	Fail(ctx context.Context, id, leaseToken, errMsg string, permanent bool) (models.Job, error)
 }
 
@@ -514,17 +544,17 @@ func (jw *jobWorker) Run(ctx context.Context, job models.Job) error {
 	start := time.Now()
 	defer func() {
 		jw.metrics.WorkerInFlight.Dec()
-		jw.metrics.JobDuration.Observe(time.Since(start).Seconds())
+		jw.metrics.ObserveJobDuration(job.Task.Name, time.Since(start).Seconds())
 	}()
 
-	jw.metrics.JobStarted.Inc()
+	jw.metrics.IncJobStarted(job.Task.Name)
 
 	stopRenewLease := jw.startLeaseRenewal(ctx, job)
 	defer stopRenewLease()
 
 	if runErr := jw.execute(ctx, job); runErr != nil {
 		breaker.RecordFailure()
-		jw.metrics.JobFailed.Inc()
+		jw.metrics.IncJobFailed(job.Task.Name)
 
 		// The retry policy lives in the service layer so that this path and the
 		// HTTP fail endpoint cannot drift. ErrNoRetry is how an in-process
@@ -538,9 +568,9 @@ func (jw *jobWorker) Run(ctx context.Context, job models.Job) error {
 	}
 
 	breaker.RecordSuccess()
-	jw.metrics.JobCompleted.Inc()
+	jw.metrics.IncJobCompleted(job.Task.Name)
 
-	if err := jw.outcome.Complete(ctx, job.ID, job.LeaseToken, nil); err != nil {
+	if _, err := jw.outcome.Complete(ctx, job.ID, job.LeaseToken, nil); err != nil {
 		jw.log.Error().Err(err).Str("job_id", job.ID).Msg("failed to mark job complete")
 		return err
 	}

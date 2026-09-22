@@ -49,9 +49,12 @@ func (w *workerQueue) Heartbeat(context.Context, string, string, time.Duration) 
 	return w.heartbeatExpires, w.heartbeatErr
 }
 
-func (w *workerQueue) Complete(_ context.Context, _, _ string, meta map[string]string) error {
+func (w *workerQueue) Complete(_ context.Context, id, _ string, meta map[string]string) (models.Job, error) {
 	w.completeMeta = meta
-	return w.completeErr
+	if w.completeErr != nil {
+		return models.Job{}, w.completeErr
+	}
+	return models.Job{ID: id, State: models.JobStateCompleted}, nil
 }
 
 func (w *workerQueue) Fail(_ context.Context, _, token, errMsg string, permanent bool) (models.Job, error) {

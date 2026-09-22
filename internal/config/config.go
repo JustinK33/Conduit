@@ -64,8 +64,14 @@ func Default() models.Config {
 			ShutdownTimeout: 30 * time.Second,
 		},
 		Scheduler: models.SchedulerConfig{
-			Enabled:           true,
-			TickInterval:      time.Minute,
+			Enabled: true,
+			// Lateness is bounded by one tick, and cron granularity is a minute, so
+			// a minute-long tick could put a fire a full minute late. Thirty seconds
+			// halves that for one extra indexed query per instance per minute.
+			TickInterval: 30 * time.Second,
+			// MaxConcurrentRuns is the per-tick fire budget: how many due schedules
+			// one tick enqueues. Anything over budget is still due next tick, since
+			// DueSchedules orders by next_run_at.
 			MaxConcurrentRuns: 5,
 		},
 		Reconciler: models.ReconcilerConfig{
@@ -88,6 +94,19 @@ func Default() models.Config {
 			// that a claim loop does not delay the next RequeueExpiredRunning pass.
 			BatchSize:    500,
 			RunningLease: 5 * time.Minute,
+			// One sample per instance per ten seconds, against three indexed
+			// counts. Prometheus scrapes on a similar timescale, so sampling faster
+			// would only produce numbers nobody reads.
+			BacklogInterval: 10 * time.Second,
+		},
+		Retention: models.RetentionConfig{
+			// Seven days of completed history is generous for a queue and thirty
+			// days of it is a disk bill. A DEAD job is the one somebody wants to
+			// investigate, so nothing deletes those until asked: zero means forever.
+			Completed: 168 * time.Hour,
+			Dead:      0,
+			Interval:  time.Hour,
+			BatchSize: 1000,
 		},
 		Metrics: models.MetricsConfig{
 			Namespace:     "conduit",
@@ -177,6 +196,12 @@ func LoadFromEnvironment(env Environment) (models.Config, error) {
 	p.dur("RECONCILER_IDLE_INTERVAL", &cfg.Reconciler.IdleInterval)
 	p.intv("RECONCILER_BATCH_SIZE", &cfg.Reconciler.BatchSize)
 	p.dur("RECONCILER_RUNNING_LEASE", &cfg.Reconciler.RunningLease)
+	p.dur("RECONCILER_BACKLOG_INTERVAL", &cfg.Reconciler.BacklogInterval)
+
+	p.dur("RETENTION_COMPLETED", &cfg.Retention.Completed)
+	p.dur("RETENTION_DEAD", &cfg.Retention.Dead)
+	p.dur("RETENTION_INTERVAL", &cfg.Retention.Interval)
+	p.intv("RETENTION_BATCH_SIZE", &cfg.Retention.BatchSize)
 
 	p.str("METRICS_NAMESPACE", &cfg.Metrics.Namespace)
 	p.str("METRICS_SUBSYSTEM", &cfg.Metrics.Subsystem)

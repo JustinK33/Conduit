@@ -69,9 +69,12 @@ func (m *mockStore) RequeueExpiredRunning(context.Context, int) (int, error) { r
 func (m *mockStore) ReleaseClaim(context.Context, models.Job, string, time.Duration) error {
 	return nil
 }
-func (m *mockStore) CompleteClaimedJob(_ context.Context, _, _ string, meta map[string]string) error {
+func (m *mockStore) CompleteClaimedJob(_ context.Context, id, _ string, meta map[string]string) (models.Job, error) {
 	m.completeMeta = meta
-	return m.completeErr
+	if m.completeErr != nil {
+		return models.Job{}, m.completeErr
+	}
+	return models.Job{ID: id, State: models.JobStateCompleted}, nil
 }
 func (m *mockStore) FailClaimedJob(_ context.Context, _, token, errMsg string, nextRun *time.Time) error {
 	m.failCalls++
@@ -83,6 +86,7 @@ func (m *mockStore) FailClaimedJob(_ context.Context, _, token, errMsg string, n
 func (m *mockStore) ListJobs(context.Context, store.ListFilter) ([]models.Job, string, error) {
 	return nil, "", nil
 }
+func (m *mockStore) RequeueDeadJob(context.Context, string) error { return nil }
 
 // mockPublisher satisfies Publisher with controllable responses.
 type mockPublisher struct {
@@ -405,7 +409,7 @@ func TestComplete(t *testing.T) {
 		svc := newTestService(ms, &mockPublisher{})
 
 		meta := map[string]string{"worker": "gpu-3"}
-		if err := svc.Complete(context.Background(), "job-1", "tok", meta); err != nil {
+		if _, err := svc.Complete(context.Background(), "job-1", "tok", meta); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if ms.completeMeta["worker"] != "gpu-3" {
@@ -417,7 +421,7 @@ func TestComplete(t *testing.T) {
 		ms := &mockStore{completeErr: store.ErrLeaseLost}
 		svc := newTestService(ms, &mockPublisher{})
 
-		if err := svc.Complete(context.Background(), "job-1", "stale", nil); !errors.Is(err, store.ErrLeaseLost) {
+		if _, err := svc.Complete(context.Background(), "job-1", "stale", nil); !errors.Is(err, store.ErrLeaseLost) {
 			t.Fatalf("error = %v, want ErrLeaseLost", err)
 		}
 	})
