@@ -271,7 +271,7 @@ make bench
 
 ## Performance
 
-Every measured number lives in one place: the [Measured results](README.md#measured-results) section of the README, reproducible with `make measure`.
+Every measured number lives in one place: [docs/BENCHMARKS.md](docs/BENCHMARKS.md), reproducible with `make measure`.
 
 The tuning that drove the intake numbers:
 - Made the transport publish non-blocking (goroutine after the Postgres write) - removed the broker round trip from the HTTP hot path
