@@ -30,7 +30,7 @@ func Default() models.Config {
 		HTTP: models.HTTPConfig{
 			Address:      ":8080",
 			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 15 * time.Second,
+			WriteTimeout: 30 * time.Second,
 			IdleTimeout:  60 * time.Second,
 		},
 		Kafka: models.KafkaConfig{
