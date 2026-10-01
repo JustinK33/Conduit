@@ -26,10 +26,10 @@ POST /api/jobs/claim
 Authorization: Bearer <api key>
 Content-Type: application/json
 
-{"queues": ["render", "thumbnail"], "lease_seconds": 60}
+{"queues": ["render", "thumbnail"], "names": ["render.thumbnail"], "lease_seconds": 60, "wait_seconds": 20}
 ```
 
-Both fields are optional, and an entirely empty body is a valid claim.
+Every field is optional, and an entirely empty body is a valid claim.
 
 `queues` is the routing filter, and you almost always want it.
 Omitting it claims from every queue, including queues whose jobs your worker has no code for, and a job you claim and cannot run is a job nobody else can run either.
@@ -37,6 +37,12 @@ Omitting it claims from every queue, including queues whose jobs your worker has
 `lease_seconds` is a request, not a grant.
 The server clamps it to `CONDUIT_RECONCILER_RUNNING_LEASE` (default 5 minutes) and uses that as the default when you omit it.
 Trust `lease_expires_at` in the response, not the number you asked for.
+
+`names` narrows the claim to those task names, for a worker that shares a queue but only has code for some of what lands on it.
+
+`wait_seconds` holds the request open until a job arrives or the wait runs out.
+The server clamps it to 25 seconds, or less if `CONDUIT_HTTP_WRITE_TIMEOUT` is under 27 seconds.
+An enqueue wakes a waiting claim straight away, and a job that becomes due on its `scheduled_at` is picked up within 2 seconds.
 
 `200` returns the job:
 
@@ -65,8 +71,10 @@ Trust `lease_expires_at` in the response, not the number you asked for.
 ```
 
 `204 No Content` with an empty body means nothing was due.
-Sleep and poll again.
-There is no long-poll yet, so an idle worker costs one indexed query per poll; a second or two between polls is a reasonable default and queue latency is bounded by that interval.
+With `wait_seconds` set, claim again straight away.
+Without it, sleep a second or two first, and queue latency is bounded by that interval.
+
+Within the queues you claim from, a higher `task.priority` comes out first, and ties go to the earliest `scheduled_at`.
 
 The claim is atomic across every worker: it is a `SELECT ... FOR UPDATE SKIP LOCKED` that flips the row to `RUNNING` in the same statement.
 Two workers polling at the same instant get two different jobs, never the same one twice.
@@ -220,8 +228,8 @@ A client written against v0.1.0 gets a 400 rather than a silent misread.
 | Code | Meaning | What a worker should do |
 | --- | --- | --- |
 | `200` | Done | Continue |
-| `204` | Nothing due (claim only) | Sleep, poll again |
-| `400 invalid_request` | Malformed body, missing `lease_token`, negative `lease_seconds` | Fix the client; retrying will not help |
+| `204` | Nothing due (claim only) | Claim again, after a sleep if you did not set `wait_seconds` |
+| `400 invalid_request` | Malformed body, missing `lease_token`, negative `lease_seconds` or `wait_seconds` | Fix the client; retrying will not help |
 | `401 unauthorized` | Missing or wrong API key | Fix the key |
 | `404 not_found` | No such job | Stop; claim another |
 | `409 lease_lost` | Someone else owns this job now | Abandon it; claim another |
@@ -244,9 +252,4 @@ There is no switch that turns the pool off, so if the server should only ever ha
 
 Named here so you can tell a missing feature from a bug:
 
-- No long-poll on claim, so dispatch latency is your poll interval.
-- No queue priority; jobs come out in `scheduled_at` order.
-- No filter on task name, only on queue.
 - No per-worker identity, so the API cannot tell you which worker holds a job.
-
-All four are [phase 5](ROADMAP.md#phase-5---operability-under-real-load).

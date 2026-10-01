@@ -168,7 +168,7 @@ pass-through when `CONDUIT_API_KEYS` is unset and no key has been issued.
 | Method | Path | Notes |
 |--------|------|-------|
 | `POST` | `/api/jobs` | Requires `task.name`; returns the assigned job ID. Optional `idempotency_key` and `scheduled_at`. |
-| `GET`  | `/api/jobs` | Cursor-paginated list. Query params: `state` (PENDING / RUNNING / COMPLETED / DEAD), `limit`, `cursor`. |
+| `GET`  | `/api/jobs` | Cursor-paginated list. Query params: `state` (PENDING / RUNNING / COMPLETED / DEAD), `limit`, `cursor`, and `include=payload`, without which payloads are left out. |
 | `GET`  | `/api/jobs/by-idempotency-key/:key` | Look up the job a given idempotency key produced. |
 | `GET`  | `/api/jobs/:id` | Reads directly from Postgres. Never includes `lease_token`. |
 | `POST` | `/api/jobs/:id/cancel` | Transitions job to DEAD. |

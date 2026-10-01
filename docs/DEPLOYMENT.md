@@ -132,8 +132,8 @@ server {
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # Must exceed the long-poll wait when phase 5 lands, or claims get
-        # cut off mid-wait and workers see spurious errors.
+        # Must exceed the 25s long-poll wait, or claims get cut off
+        # mid-wait and workers see spurious errors.
         proxy_read_timeout 60s;
         proxy_send_timeout 60s;
     }
@@ -289,6 +289,8 @@ max(conduit_server_jobs_backlog{state="DEAD"})
 histogram_quantile(0.95,
   sum by (task, le) (rate(conduit_server_job_duration_seconds_bucket[5m])))
 ```
+
+`docker compose --profile observability up -d` starts Prometheus and Grafana with these panels already provisioned, at `localhost:3000` as `admin`/`admin`.
 
 Alert on the backlog and on the dead-letter step, not on a failure rate: a queue whose whole job is to retry will have a nonzero failure rate all day.
 

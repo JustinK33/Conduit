@@ -113,21 +113,17 @@ Verified end to end: six `webhook` jobs against a dead endpoint trip their own b
 
 **Done when** the untuned drain number is within 20% of the tuned one, and a task type whose endpoint is dead does not stop unrelated task types.
 
-## Phase 5 - Operability under real load
+## Phase 5 - Operability under real load (done)
 
-Three of these shipped in v0.4.0.
+Three of these shipped in v0.4.0 and the rest in v0.5.0.
 
 - ~~Manual retry and dead-letter requeue endpoints, so a `DEAD` job is recoverable without a SQL prompt.~~ `POST /api/jobs/:id/requeue`. `CanTransition` was not loosened: `DEAD` stays terminal for every automatic path, and the store method that resurrects a job says in its comment that it is the deliberate human-driven exception.
 - ~~Labels on the job metrics, which currently have none, so per-queue and per-task breakdowns are possible at all.~~ A single `task` label, bounded to the handler set registered at boot plus `other`, because task names come from callers and an unfiltered label is unbounded cardinality on untrusted input. That is the argument the per-task circuit breaker already settled.
-- ~~Grafana dashboards, or at minimum documented panels, for queue depth, latency, failures, retries, and worker saturation.~~ Partly: `jobs_backlog{state}` is the queue-depth metric that did not exist, and [DEPLOYMENT.md](DEPLOYMENT.md#monitoring) has the PromQL for it, the per-task failure rate, dead-letter growth, and the duration p95. Provisioned dashboards are still not in the repo.
-
-Still open:
-
-- Queue priority, so an urgent queue is not stuck behind a batch job.
-- Long-poll on claim, replacing poll-and-204, once claim QPS makes the polling overhead worth removing.
-- Task-name filters on claim, finer-grained than queue routing.
-- List responses that omit payloads by default.
-- Provisioned Grafana dashboards, rather than PromQL in a doc.
+- ~~Grafana dashboards, or at minimum documented panels, for queue depth, latency, failures, retries, and worker saturation.~~ Partly: `jobs_backlog{state}` is the queue-depth metric that did not exist, and [DEPLOYMENT.md](DEPLOYMENT.md#monitoring) has the PromQL for it, the per-task failure rate, dead-letter growth, and the duration p95. `deploy/grafana` now provisions a dashboard with those panels into the compose `observability` profile.
+- ~~Queue priority, so an urgent queue is not stuck behind a batch job.~~ `task.priority`, higher first, with the pending indexes rebuilt to lead with it.
+- ~~Long-poll on claim, replacing poll-and-204.~~ `wait_seconds`, woken by the same `NOTIFY` the reconciler listens to. A claim waiting 20 seconds returned 2 ms after an enqueue from another process.
+- ~~Task-name filters on claim, finer-grained than queue routing.~~ `names` on the claim body.
+- ~~List responses that omit payloads by default.~~ `GET /api/jobs` leaves them out unless `?include=payload`.
 
 **Done when** running Conduit for a week does not require opening `psql`.
 
