@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -57,8 +58,10 @@ func main() {
 		err = run(ctx)
 	case "migrate":
 		err = runMigrations(ctx)
+	case "keys":
+		err = runKeys(ctx, os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "conduit: unknown command %q (want serve or migrate)\n", command)
+		fmt.Fprintf(os.Stderr, "conduit: unknown command %q (want serve, migrate, or keys)\n", command)
 		os.Exit(2)
 	}
 
@@ -116,6 +119,56 @@ func runMigrations(ctx context.Context) error {
 	defer pgPool.Close()
 
 	return store.Migrate(ctx, pgPool, cfg.Postgres.MigrationsPath, logger.WithComponent(log, "migrate"))
+}
+
+const keysUsage = "usage: conduit keys create <tenant> [name] | list | revoke <id>"
+
+func runKeys(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New(keysUsage)
+	}
+	_, _, pgPool, err := bootstrap(ctx)
+	if err != nil {
+		return err
+	}
+	defer pgPool.Close()
+	keys := store.NewKeyStore(pgPool)
+
+	switch {
+	case args[0] == "create" && (len(args) == 2 || len(args) == 3):
+		name := ""
+		if len(args) == 3 {
+			name = args[2]
+		}
+		id, key, err := keys.CreateKey(ctx, args[1], name)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("id:     %s\ntenant: %s\nkey:    %s\n\nthe key is not stored, so copy it now\n", id, args[1], key)
+	case args[0] == "list" && len(args) == 1:
+		list, err := keys.ListKeys(ctx)
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tTENANT\tNAME\tCREATED\tREVOKED")
+		for _, k := range list {
+			revoked := "-"
+			if k.RevokedAt != nil {
+				revoked = k.RevokedAt.UTC().Format(time.RFC3339)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", k.ID, k.TenantID, k.Name, k.CreatedAt.UTC().Format(time.RFC3339), revoked)
+		}
+		return w.Flush()
+	case args[0] == "revoke" && len(args) == 2:
+		if err := keys.RevokeKey(ctx, args[1]); err != nil {
+			return err
+		}
+		fmt.Println("revoked", args[1])
+	default:
+		return errors.New(keysUsage)
+	}
+	return nil
 }
 
 func run(ctx context.Context) error {
