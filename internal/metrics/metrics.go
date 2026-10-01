@@ -112,11 +112,17 @@ func (r *Registry) TaskLabel(task string) string {
 	return TaskOther
 }
 
-func (r *Registry) IncJobEnqueued(task string)  { r.JobEnqueued.WithLabelValues(r.TaskLabel(task)).Inc() }
-func (r *Registry) IncJobStarted(task string)   { r.JobStarted.WithLabelValues(r.TaskLabel(task)).Inc() }
-func (r *Registry) IncJobCompleted(task string) { r.JobCompleted.WithLabelValues(r.TaskLabel(task)).Inc() }
-func (r *Registry) IncJobFailed(task string)    { r.JobFailed.WithLabelValues(r.TaskLabel(task)).Inc() }
-func (r *Registry) IncJobCancelled(task string) { r.JobCancelled.WithLabelValues(r.TaskLabel(task)).Inc() }
+func (r *Registry) IncJobEnqueued(task string) {
+	r.JobEnqueued.WithLabelValues(r.TaskLabel(task)).Inc()
+}
+func (r *Registry) IncJobStarted(task string) { r.JobStarted.WithLabelValues(r.TaskLabel(task)).Inc() }
+func (r *Registry) IncJobCompleted(task string) {
+	r.JobCompleted.WithLabelValues(r.TaskLabel(task)).Inc()
+}
+func (r *Registry) IncJobFailed(task string) { r.JobFailed.WithLabelValues(r.TaskLabel(task)).Inc() }
+func (r *Registry) IncJobCancelled(task string) {
+	r.JobCancelled.WithLabelValues(r.TaskLabel(task)).Inc()
+}
 
 func (r *Registry) ObserveJobDuration(task string, seconds float64) {
 	r.JobDuration.WithLabelValues(r.TaskLabel(task)).Observe(seconds)
