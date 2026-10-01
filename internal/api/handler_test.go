@@ -112,7 +112,7 @@ func (m mockStore) FailClaimedJob(context.Context, string, string, string, *time
 	return nil
 }
 func (m mockStore) ListJobs(context.Context, store.ListFilter) ([]models.Job, string, error) {
-	return nil, "", nil
+	return []models.Job{{ID: "job-1", Task: models.Task{Name: "webhook", Payload: models.Payload(`{"big":true}`)}}}, "", nil
 }
 func (m mockStore) RequeueDeadJob(context.Context, string, string) error { return m.requeueErr }
 
@@ -470,5 +470,24 @@ func TestRequeueJob(t *testing.T) {
 				t.Errorf("response should report the new state, got: %s", w.Body.String())
 			}
 		})
+	}
+}
+
+func TestListJobsOmitsPayloadsUnlessAsked(t *testing.T) {
+	router := gin.New()
+	NewHandler(mockQueue{}, mockStore{}, zerolog.Nop(), testRegistry(), nil).RegisterRoutes(router)
+
+	for path, want := range map[string]bool{
+		"/api/jobs":                 false,
+		"/api/jobs?include=payload": true,
+	} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status = %d", path, rec.Code)
+		}
+		if got := strings.Contains(rec.Body.String(), `"payload"`); got != want {
+			t.Errorf("GET %s: payload present = %v, want %v: %s", path, got, want, rec.Body.String())
+		}
 	}
 }

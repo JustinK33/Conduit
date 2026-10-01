@@ -207,6 +207,15 @@ func (h *Handler) ListJobs(c *gin.Context) {
 		RespondError(c, http.StatusInternalServerError, "internal_error", "failed to list jobs")
 		return
 	}
+	// A page of payloads can be megabytes nobody asked for. GET /api/jobs/:id
+	// always has it.
+	// ponytail: still read from the database, drop it from the SELECT if that
+	// read ever shows up in a profile.
+	if c.Query("include") != "payload" {
+		for i := range jobs {
+			jobs[i].Task.Payload = nil
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"jobs":        jobs,
