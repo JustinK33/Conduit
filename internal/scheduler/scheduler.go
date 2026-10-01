@@ -164,6 +164,7 @@ func (s *Scheduler) fire(ctx context.Context, sched models.Schedule, now time.Ti
 	}
 
 	job := models.Job{
+		TenantID: sched.TenantID,
 		// The fire instant, not the wall clock, is what makes this key stable
 		// across replicas: they all read the same next_run_at.
 		IdempotencyKey: fmt.Sprintf("%s%s:%d", IdempotencyPrefix, sched.ID, fireAt.Unix()),

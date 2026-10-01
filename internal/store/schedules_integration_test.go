@@ -146,7 +146,7 @@ func TestAdvanceScheduleIsConditional(t *testing.T) {
 		t.Error("a stale observed next_run_at advanced the schedule, so every replica would fire")
 	}
 
-	list, err := s.ListSchedules(ctx)
+	list, err := s.ListSchedules(ctx, models.DefaultTenant)
 	if err != nil {
 		t.Fatalf("ListSchedules: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestDeleteScheduleReportsAMiss(t *testing.T) {
 	ctx, pool := testPool(t)
 	s := NewScheduleStore(pool, scheduleTestTable(ctx, t, pool))
 
-	if err := s.DeleteSchedule(ctx, "no-such-schedule"); err != ErrScheduleNotFound {
+	if err := s.DeleteSchedule(ctx, models.DefaultTenant, "no-such-schedule"); err != ErrScheduleNotFound {
 		t.Fatalf("DeleteSchedule: got %v, want ErrScheduleNotFound", err)
 	}
 }
@@ -373,5 +373,35 @@ func TestCountByState(t *testing.T) {
 	// as a broken exporter.
 	if got, ok := counts[models.JobStateDead]; !ok || got != 0 {
 		t.Errorf("DEAD = %d (present %v), want 0 and present", got, ok)
+	}
+}
+
+func TestSchedulesArePerTenant(t *testing.T) {
+	ctx, pool := testPool(t)
+	s := NewScheduleStore(pool, scheduleTestTable(ctx, t, pool))
+
+	for _, tenant := range []string{"acme", "globex"} {
+		_, err := s.CreateSchedule(ctx, models.Schedule{
+			TenantID:  tenant,
+			Name:      "nightly",
+			Cron:      "0 3 * * *",
+			Task:      models.Task{Name: "webhook"},
+			Enabled:   true,
+			NextRunAt: time.Now().UTC().Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatalf("CreateSchedule(%s): %v", tenant, err)
+		}
+	}
+
+	list, err := s.ListSchedules(ctx, "acme")
+	if err != nil {
+		t.Fatalf("ListSchedules: %v", err)
+	}
+	if len(list) != 1 || list[0].TenantID != "acme" {
+		t.Fatalf("ListSchedules(acme) = %v, want one acme schedule", list)
+	}
+	if err := s.DeleteSchedule(ctx, "globex", list[0].ID); err != ErrScheduleNotFound {
+		t.Errorf("DeleteSchedule across tenants: got %v, want ErrScheduleNotFound", err)
 	}
 }

@@ -16,8 +16,8 @@ import (
 // ScheduleStore is the subset of *store.ScheduleStore these three routes need.
 type ScheduleStore interface {
 	CreateSchedule(ctx context.Context, sched models.Schedule) (models.Schedule, error)
-	ListSchedules(ctx context.Context) ([]models.Schedule, error)
-	DeleteSchedule(ctx context.Context, id string) error
+	ListSchedules(ctx context.Context, tenant string) ([]models.Schedule, error)
+	DeleteSchedule(ctx context.Context, tenant, id string) error
 }
 
 // ScheduleHandler serves /api/schedules.
@@ -88,6 +88,7 @@ func (h *ScheduleHandler) CreateSchedule(c *gin.Context) {
 	}
 
 	sched, err := h.Store.CreateSchedule(c.Request.Context(), models.Schedule{
+		TenantID:  tenantOf(c),
 		Name:      request.Name,
 		Cron:      request.Cron,
 		Task:      request.Task,
@@ -112,7 +113,7 @@ func (h *ScheduleHandler) CreateSchedule(c *gin.Context) {
 func (h *ScheduleHandler) ListSchedules(c *gin.Context) {
 	log := zerolog.Ctx(c.Request.Context())
 
-	schedules, err := h.Store.ListSchedules(c.Request.Context())
+	schedules, err := h.Store.ListSchedules(c.Request.Context(), tenantOf(c))
 	if err != nil {
 		log.Error().Err(err).Msg("list schedules failed")
 		RespondError(c, http.StatusInternalServerError, "internal_error", "failed to list schedules")
@@ -131,7 +132,7 @@ func (h *ScheduleHandler) DeleteSchedule(c *gin.Context) {
 	log := zerolog.Ctx(c.Request.Context())
 	id := c.Param("id")
 
-	if err := h.Store.DeleteSchedule(c.Request.Context(), id); err != nil {
+	if err := h.Store.DeleteSchedule(c.Request.Context(), tenantOf(c), id); err != nil {
 		if errors.Is(err, store.ErrScheduleNotFound) {
 			RespondError(c, http.StatusNotFound, "not_found", "schedule not found")
 			return

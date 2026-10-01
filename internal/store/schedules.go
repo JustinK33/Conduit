@@ -45,7 +45,7 @@ func NewScheduleStore(pool *pgxpool.Pool, tableName string) *ScheduleStore {
 
 const scheduleColumns = `id, name, cron_expr,
 	task_name, task_queue, task_payload, task_max_retries, task_timeout_ns, task_metadata,
-	enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at`
+	enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, tenant_id`
 
 // CreateSchedule inserts a schedule and returns it as stored, with the id and
 // timestamps filled in. The caller supplies the cron expression and the first
@@ -67,6 +67,9 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sched models.Schedul
 	if sched.Task.Queue == "" {
 		sched.Task.Queue = models.DefaultQueue
 	}
+	if sched.TenantID == "" {
+		sched.TenantID = models.DefaultTenant
+	}
 
 	now := time.Now().UTC()
 	if sched.CreatedAt.IsZero() {
@@ -78,8 +81,8 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sched models.Schedul
 		INSERT INTO %s (
 			id, name, cron_expr,
 			task_name, task_queue, task_payload, task_max_retries, task_timeout_ns, task_metadata,
-			enabled, next_run_at, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, s.TableName)
+			enabled, next_run_at, created_at, updated_at, tenant_id
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, s.TableName)
 
 	_, err = s.Pool.Exec(ctx, query,
 		sched.ID,
@@ -95,6 +98,7 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sched models.Schedul
 		sched.NextRunAt,
 		sched.CreatedAt,
 		sched.UpdatedAt,
+		sched.TenantID,
 	)
 	if isUniqueViolation(err) {
 		return models.Schedule{}, ErrDuplicateSchedule
@@ -105,10 +109,10 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sched models.Schedul
 	return sched, nil
 }
 
-func (s *ScheduleStore) ListSchedules(ctx context.Context) ([]models.Schedule, error) {
-	query := fmt.Sprintf(`SELECT %s FROM %s ORDER BY name ASC`, scheduleColumns, s.TableName)
+func (s *ScheduleStore) ListSchedules(ctx context.Context, tenant string) ([]models.Schedule, error) {
+	query := fmt.Sprintf(`SELECT %s FROM %s WHERE tenant_id = $1 ORDER BY name ASC`, scheduleColumns, s.TableName)
 
-	rows, err := s.Pool.Query(ctx, query)
+	rows, err := s.Pool.Query(ctx, query, tenant)
 	if err != nil {
 		return nil, err
 	}
@@ -125,9 +129,9 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context) ([]models.Schedule, e
 	return schedules, rows.Err()
 }
 
-func (s *ScheduleStore) DeleteSchedule(ctx context.Context, id string) error {
-	query := fmt.Sprintf(`DELETE FROM %s WHERE id = $1`, s.TableName)
-	tag, err := s.Pool.Exec(ctx, query, id)
+func (s *ScheduleStore) DeleteSchedule(ctx context.Context, tenant, id string) error {
+	query := fmt.Sprintf(`DELETE FROM %s WHERE id = $1 AND tenant_id = $2`, s.TableName)
+	tag, err := s.Pool.Exec(ctx, query, id, tenant)
 	if err != nil {
 		return err
 	}
@@ -221,6 +225,7 @@ func scanSchedule(ctx context.Context, row pgx.Row) (models.Schedule, error) {
 		&lastJobID,
 		&sched.CreatedAt,
 		&sched.UpdatedAt,
+		&sched.TenantID,
 	)
 	if err != nil {
 		return models.Schedule{}, err

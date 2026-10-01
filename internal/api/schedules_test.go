@@ -32,11 +32,11 @@ func (m *mockScheduleStore) CreateSchedule(_ context.Context, sched models.Sched
 	return sched, nil
 }
 
-func (m *mockScheduleStore) ListSchedules(context.Context) ([]models.Schedule, error) {
+func (m *mockScheduleStore) ListSchedules(context.Context, string) ([]models.Schedule, error) {
 	return m.list, m.listErr
 }
 
-func (m *mockScheduleStore) DeleteSchedule(_ context.Context, id string) error {
+func (m *mockScheduleStore) DeleteSchedule(_ context.Context, _, id string) error {
 	m.deletedID = id
 	return m.deleteErr
 }

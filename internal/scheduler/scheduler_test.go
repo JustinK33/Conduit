@@ -140,6 +140,7 @@ func TestSchedulerFires(t *testing.T) {
 
 		store := &fakeStore{schedules: []models.Schedule{{
 			ID:        "sch-1",
+			TenantID:  "acme",
 			Name:      "nightly",
 			Cron:      "* * * * *",
 			Task:      models.Task{Name: "sql.etl", Queue: "default"},
@@ -152,6 +153,9 @@ func TestSchedulerFires(t *testing.T) {
 
 		if len(enq.jobs) != 1 {
 			t.Fatalf("enqueued %d jobs, want 1", len(enq.jobs))
+		}
+		if got := enq.jobs[0].TenantID; got != "acme" {
+			t.Errorf("tenant = %q, want the schedule's own acme", got)
 		}
 		wantKey := fmt.Sprintf("sched:sch-1:%d", fireAt.Unix())
 		if got := enq.jobs[0].IdempotencyKey; got != wantKey {
