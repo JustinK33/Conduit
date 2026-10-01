@@ -772,7 +772,7 @@ func isIdempotencyUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) &&
 		pgErr.Code == "23505" &&
-		pgErr.ConstraintName == "jobs_idempotency_key_idx"
+		pgErr.ConstraintName == "jobs_tenant_idempotency_key_idx"
 }
 
 func encodeCursor(t time.Time, id string) string {
