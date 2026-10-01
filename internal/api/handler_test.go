@@ -39,8 +39,8 @@ type mockQueue struct {
 func (m mockQueue) Enqueue(context.Context, models.Job) (string, error) {
 	return m.enqueueID, m.enqueueErr
 }
-func (m mockQueue) Cancel(context.Context, string) error { return m.cancelErr }
-func (m mockQueue) Claim(context.Context, []string, time.Duration) (models.Job, error) {
+func (m mockQueue) Cancel(context.Context, string, string) error { return m.cancelErr }
+func (m mockQueue) Claim(context.Context, store.ClaimFilter, time.Duration) (models.Job, error) {
 	return models.Job{}, store.ErrJobNotFound
 }
 func (m mockQueue) Heartbeat(context.Context, string, string, time.Duration) (time.Time, error) {
@@ -67,8 +67,8 @@ func (s *spyQueue) Enqueue(_ context.Context, job models.Job) (string, error) {
 	return s.enqueueID, nil
 }
 
-func (s *spyQueue) Cancel(context.Context, string) error { return nil }
-func (s *spyQueue) Claim(context.Context, []string, time.Duration) (models.Job, error) {
+func (s *spyQueue) Cancel(context.Context, string, string) error { return nil }
+func (s *spyQueue) Claim(context.Context, store.ClaimFilter, time.Duration) (models.Job, error) {
 	return models.Job{}, store.ErrJobNotFound
 }
 func (s *spyQueue) Heartbeat(context.Context, string, string, time.Duration) (time.Time, error) {
@@ -92,14 +92,14 @@ type mockStore struct {
 
 func (m mockStore) CreateJob(context.Context, models.Job) error { return nil }
 func (m mockStore) UpdateJob(context.Context, models.Job) error { return nil }
-func (m mockStore) GetJob(_ context.Context, _ string) (models.Job, error) {
+func (m mockStore) GetJob(context.Context, string, string) (models.Job, error) {
 	return m.job, m.getErr
 }
-func (m mockStore) GetJobByIdempotencyKey(context.Context, string) (models.Job, error) {
+func (m mockStore) GetJobByIdempotencyKey(context.Context, string, string) (models.Job, error) {
 	return m.idempotencyJob, m.idempotencyGetErr
 }
-func (m mockStore) CancelJob(context.Context, string) error { return nil }
-func (m mockStore) ClaimNextJob(context.Context, time.Duration, []string) (models.Job, error) {
+func (m mockStore) CancelJob(context.Context, string, string) error { return nil }
+func (m mockStore) ClaimNextJob(context.Context, time.Duration, store.ClaimFilter) (models.Job, error) {
 	return models.Job{}, nil
 }
 func (m mockStore) RenewLease(context.Context, models.Job, time.Duration) error           { return nil }
@@ -114,7 +114,7 @@ func (m mockStore) FailClaimedJob(context.Context, string, string, string, *time
 func (m mockStore) ListJobs(context.Context, store.ListFilter) ([]models.Job, string, error) {
 	return nil, "", nil
 }
-func (m mockStore) RequeueDeadJob(context.Context, string) error { return m.requeueErr }
+func (m mockStore) RequeueDeadJob(context.Context, string, string) error { return m.requeueErr }
 
 func TestNewHandler(t *testing.T) {
 	t.Run("wires queue and store dependencies", func(t *testing.T) {

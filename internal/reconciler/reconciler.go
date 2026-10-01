@@ -13,7 +13,7 @@ import (
 )
 
 type JobStore interface {
-	ClaimNextJob(context.Context, time.Duration, []string) (models.Job, error)
+	ClaimNextJob(context.Context, time.Duration, store.ClaimFilter) (models.Job, error)
 	RequeueExpiredRunning(context.Context, int) (int, error)
 	ReleaseClaim(context.Context, models.Job, string, time.Duration) error
 	DeleteFinished(context.Context, models.JobState, time.Time, int) (int, error)
@@ -186,7 +186,7 @@ func (r *Reconciler) reconcile(ctx context.Context) bool {
 			return hadWork
 		}
 
-		job, err := r.store.ClaimNextJob(ctx, r.cfg.RunningLease, r.cfg.Queues)
+		job, err := r.store.ClaimNextJob(ctx, r.cfg.RunningLease, store.ClaimFilter{Queues: r.cfg.Queues})
 		if errors.Is(err, store.ErrJobNotFound) {
 			break
 		}

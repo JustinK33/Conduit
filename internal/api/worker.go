@@ -78,8 +78,8 @@ func (h *Handler) ClaimJob(c *gin.Context) {
 		return
 	}
 
-	job, err := h.Queue.Claim(c.Request.Context(), request.Queues,
-		time.Duration(request.LeaseSeconds)*time.Second)
+	filter := store.ClaimFilter{Tenant: tenantOf(c), Queues: request.Queues}
+	job, err := h.Queue.Claim(c.Request.Context(), filter, time.Duration(request.LeaseSeconds)*time.Second)
 	if err != nil {
 		if errors.Is(err, store.ErrJobNotFound) {
 			c.Status(http.StatusNoContent)

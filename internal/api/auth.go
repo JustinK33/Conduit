@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/JustinK33/Conduit/pkg/models"
 	"github.com/gin-gonic/gin"
 )
 
@@ -53,8 +54,20 @@ func APIKeyAuth(keys []string) gin.HandlerFunc {
 			return
 		}
 
+		c.Set(tenantKey, models.DefaultTenant)
 		c.Next()
 	}
+}
+
+const tenantKey = "conduit.tenant"
+
+// tenantOf is the tenant a request acts for. Auth sets it, and a request on an
+// open instance acts for the default tenant.
+func tenantOf(c *gin.Context) string {
+	if t := c.GetString(tenantKey); t != "" {
+		return t
+	}
+	return models.DefaultTenant
 }
 
 func bearerToken(header string) string {

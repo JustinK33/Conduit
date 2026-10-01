@@ -11,14 +11,16 @@ import (
 
 type mockJobStore struct{}
 
-func (mockJobStore) CreateJob(context.Context, models.Job) error        { return nil }
-func (mockJobStore) UpdateJob(context.Context, models.Job) error        { return nil }
-func (mockJobStore) GetJob(context.Context, string) (models.Job, error) { return models.Job{}, nil }
-func (mockJobStore) GetJobByIdempotencyKey(context.Context, string) (models.Job, error) {
+func (mockJobStore) CreateJob(context.Context, models.Job) error { return nil }
+func (mockJobStore) UpdateJob(context.Context, models.Job) error { return nil }
+func (mockJobStore) GetJob(context.Context, string, string) (models.Job, error) {
 	return models.Job{}, nil
 }
-func (mockJobStore) CancelJob(context.Context, string) error { return nil }
-func (mockJobStore) ClaimNextJob(context.Context, time.Duration, []string) (models.Job, error) {
+func (mockJobStore) GetJobByIdempotencyKey(context.Context, string, string) (models.Job, error) {
+	return models.Job{}, nil
+}
+func (mockJobStore) CancelJob(context.Context, string, string) error { return nil }
+func (mockJobStore) ClaimNextJob(context.Context, time.Duration, ClaimFilter) (models.Job, error) {
 	return models.Job{}, nil
 }
 func (mockJobStore) RenewLease(context.Context, models.Job, time.Duration) error { return nil }

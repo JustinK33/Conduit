@@ -19,8 +19,8 @@ import (
 // worker methods are the pull protocol; see worker.go.
 type Queue interface {
 	Enqueue(context.Context, models.Job) (string, error)
-	Cancel(context.Context, string) error
-	Claim(ctx context.Context, queues []string, lease time.Duration) (models.Job, error)
+	Cancel(ctx context.Context, tenant, id string) error
+	Claim(ctx context.Context, filter store.ClaimFilter, lease time.Duration) (models.Job, error)
 	Heartbeat(ctx context.Context, id, leaseToken string, lease time.Duration) (time.Time, error)
 	Complete(ctx context.Context, id, leaseToken string, meta map[string]string) (models.Job, error)
 	Fail(ctx context.Context, id, leaseToken, errMsg string, permanent bool) (models.Job, error)
@@ -98,6 +98,7 @@ func (h *Handler) EnqueueJob(c *gin.Context) {
 	}
 
 	job := models.Job{
+		TenantID:       tenantOf(c),
 		IdempotencyKey: request.IdempotencyKey,
 		Task:           request.Task,
 		ScheduledAt:    request.ScheduledAt,
@@ -119,7 +120,7 @@ func (h *Handler) GetJobStatus(c *gin.Context) {
 	log := zerolog.Ctx(c.Request.Context())
 	id := c.Param("id")
 
-	job, err := h.Store.GetJob(c.Request.Context(), id)
+	job, err := h.Store.GetJob(c.Request.Context(), tenantOf(c), id)
 	if err != nil {
 		if errors.Is(err, store.ErrJobNotFound) {
 			RespondError(c, http.StatusNotFound, "not_found", "job not found")
@@ -141,7 +142,7 @@ func (h *Handler) GetJobByIdempotencyKey(c *gin.Context) {
 		return
 	}
 
-	job, err := h.Store.GetJobByIdempotencyKey(c.Request.Context(), key)
+	job, err := h.Store.GetJobByIdempotencyKey(c.Request.Context(), tenantOf(c), key)
 	if err != nil {
 		if errors.Is(err, store.ErrJobNotFound) {
 			RespondError(c, http.StatusNotFound, "not_found", "job not found")
@@ -164,6 +165,7 @@ func (h *Handler) ListJobs(c *gin.Context) {
 	log := zerolog.Ctx(c.Request.Context())
 
 	filter := store.ListFilter{
+		Tenant: tenantOf(c),
 		State:  models.JobState(c.Query("state")),
 		Cursor: c.Query("cursor"),
 	}
@@ -206,7 +208,7 @@ func (h *Handler) CancelJob(c *gin.Context) {
 	// Read first, for the task name the cancelled counter is labelled by. A
 	// cancel is a human pressing a button, so one extra primary-key lookup is
 	// free here in a way it would not be on the claim path.
-	job, err := h.Store.GetJob(c.Request.Context(), id)
+	job, err := h.Store.GetJob(c.Request.Context(), tenantOf(c), id)
 	if err != nil {
 		if errors.Is(err, store.ErrJobNotFound) {
 			RespondError(c, http.StatusNotFound, "not_found", "job not found")
@@ -217,7 +219,7 @@ func (h *Handler) CancelJob(c *gin.Context) {
 		return
 	}
 
-	if err := h.Queue.Cancel(c.Request.Context(), id); err != nil {
+	if err := h.Queue.Cancel(c.Request.Context(), tenantOf(c), id); err != nil {
 		if errors.Is(err, store.ErrJobNotFound) {
 			RespondError(c, http.StatusNotFound, "not_found", "job not found")
 			return
@@ -245,7 +247,7 @@ func (h *Handler) RequeueJob(c *gin.Context) {
 	log := zerolog.Ctx(c.Request.Context())
 	id := c.Param("id")
 
-	if err := h.Store.RequeueDeadJob(c.Request.Context(), id); err != nil {
+	if err := h.Store.RequeueDeadJob(c.Request.Context(), tenantOf(c), id); err != nil {
 		if errors.Is(err, store.ErrJobNotFound) {
 			RespondError(c, http.StatusNotFound, "not_found", "job not found")
 			return

@@ -43,7 +43,7 @@ type deleteCall struct {
 	limit  int
 }
 
-func (fake *fakeStore) ClaimNextJob(_ context.Context, leaseDuration time.Duration, _ []string) (models.Job, error) {
+func (fake *fakeStore) ClaimNextJob(_ context.Context, leaseDuration time.Duration, _ store.ClaimFilter) (models.Job, error) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	fake.leaseDuration = leaseDuration

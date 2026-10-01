@@ -45,20 +45,20 @@ func (m *mockStore) CreateJob(_ context.Context, job models.Job) error {
 	return m.createErr
 }
 func (m *mockStore) UpdateJob(_ context.Context, _ models.Job) error { return nil }
-func (m *mockStore) GetJob(_ context.Context, _ string) (models.Job, error) {
+func (m *mockStore) GetJob(context.Context, string, string) (models.Job, error) {
 	return m.getJob, m.getJobErr
 }
-func (m *mockStore) GetJobByIdempotencyKey(_ context.Context, _ string) (models.Job, error) {
+func (m *mockStore) GetJobByIdempotencyKey(context.Context, string, string) (models.Job, error) {
 	m.idempotencyCalls++
 	if m.createErr == store.ErrDuplicateIdempotencyKey && m.idempotencyCalls > 1 {
 		return m.idempotencyJob, nil
 	}
 	return m.idempotencyJob, m.idempotencyLookup
 }
-func (m *mockStore) CancelJob(_ context.Context, _ string) error { return m.cancelErr }
-func (m *mockStore) ClaimNextJob(_ context.Context, lease time.Duration, queues []string) (models.Job, error) {
+func (m *mockStore) CancelJob(context.Context, string, string) error { return m.cancelErr }
+func (m *mockStore) ClaimNextJob(_ context.Context, lease time.Duration, filter store.ClaimFilter) (models.Job, error) {
 	m.claimLease = lease
-	m.claimQueues = queues
+	m.claimQueues = filter.Queues
 	return m.claimJob, m.claimErr
 }
 func (m *mockStore) RenewLease(_ context.Context, _ models.Job, lease time.Duration) error {
@@ -86,7 +86,7 @@ func (m *mockStore) FailClaimedJob(_ context.Context, _, token, errMsg string, n
 func (m *mockStore) ListJobs(context.Context, store.ListFilter) ([]models.Job, string, error) {
 	return nil, "", nil
 }
-func (m *mockStore) RequeueDeadJob(context.Context, string) error { return nil }
+func (m *mockStore) RequeueDeadJob(context.Context, string, string) error { return nil }
 
 // mockPublisher satisfies Publisher with controllable responses.
 type mockPublisher struct {
@@ -273,7 +273,7 @@ func TestEnqueuePublishesDueJob(t *testing.T) {
 func TestCancelSuccess(t *testing.T) {
 	svc := newTestService(&mockStore{}, &mockPublisher{})
 
-	if err := svc.Cancel(context.Background(), "job-123"); err != nil {
+	if err := svc.Cancel(context.Background(), models.DefaultTenant, "job-123"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -283,7 +283,7 @@ func TestCancelError(t *testing.T) {
 	ms := &mockStore{cancelErr: cancelErr}
 	svc := newTestService(ms, &mockPublisher{})
 
-	err := svc.Cancel(context.Background(), "nonexistent")
+	err := svc.Cancel(context.Background(), models.DefaultTenant, "nonexistent")
 	if err == nil {
 		t.Fatal("expected error when cancel fails, got nil")
 	}
@@ -349,7 +349,7 @@ func TestClaim(t *testing.T) {
 			ms := &mockStore{claimJob: tc.storeJob, claimErr: tc.storeErr}
 			svc := newTestService(ms, &mockPublisher{})
 
-			job, err := svc.Claim(context.Background(), tc.queues, tc.lease)
+			job, err := svc.Claim(context.Background(), store.ClaimFilter{Queues: tc.queues}, tc.lease)
 			if tc.wantErrIs != nil {
 				if !errors.Is(err, tc.wantErrIs) {
 					t.Fatalf("error = %v, want %v", err, tc.wantErrIs)

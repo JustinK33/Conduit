@@ -239,14 +239,14 @@ func TestDeleteFinished(t *testing.T) {
 	if deleted != 1 {
 		t.Errorf("deleted = %d, want 1", deleted)
 	}
-	if _, err := s.GetJob(ctx, "old-completed"); err != ErrJobNotFound {
+	if _, err := s.GetJob(ctx, AnyTenant, "old-completed"); err != ErrJobNotFound {
 		t.Errorf("old COMPLETED job survived the sweep: %v", err)
 	}
 	// Age, state, and nothing else. A sweep that took the fresh job would lose
 	// history somebody is still reading; one that took DEAD or PENDING would lose
 	// the investigation or the work itself.
 	for _, id := range []string{"fresh-completed", "old-dead", "pending"} {
-		if _, err := s.GetJob(ctx, id); err != nil {
+		if _, err := s.GetJob(ctx, AnyTenant, id); err != nil {
 			t.Errorf("GetJob(%s) after sweep: %v", id, err)
 		}
 	}
@@ -256,7 +256,7 @@ func TestDeleteFinished(t *testing.T) {
 	if _, err := s.DeleteFinished(ctx, models.JobStateDead, now, 1); err != nil {
 		t.Fatalf("DeleteFinished(DEAD): %v", err)
 	}
-	if _, err := s.GetJob(ctx, "old-dead"); err != ErrJobNotFound {
+	if _, err := s.GetJob(ctx, AnyTenant, "old-dead"); err != ErrJobNotFound {
 		t.Errorf("old DEAD job survived an explicit DEAD sweep: %v", err)
 	}
 
@@ -295,10 +295,10 @@ func TestRequeueDeadJob(t *testing.T) {
 	setup("dead-job", models.JobStateDead)
 	setup("completed-job", models.JobStateCompleted)
 
-	if err := s.RequeueDeadJob(ctx, "dead-job"); err != nil {
+	if err := s.RequeueDeadJob(ctx, AnyTenant, "dead-job"); err != nil {
 		t.Fatalf("RequeueDeadJob: %v", err)
 	}
-	got, err := s.GetJob(ctx, "dead-job")
+	got, err := s.GetJob(ctx, AnyTenant, "dead-job")
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
@@ -325,10 +325,10 @@ func TestRequeueDeadJob(t *testing.T) {
 
 	// A COMPLETED job already succeeded, and a RUNNING one has a worker holding
 	// its lease. The WHERE state = 'DEAD' guard is what the API's 409 rests on.
-	if err := s.RequeueDeadJob(ctx, "completed-job"); err != ErrInvalidTransition {
+	if err := s.RequeueDeadJob(ctx, AnyTenant, "completed-job"); err != ErrInvalidTransition {
 		t.Fatalf("RequeueDeadJob(COMPLETED): got %v, want ErrInvalidTransition", err)
 	}
-	if err := s.RequeueDeadJob(ctx, "no-such-job"); err != ErrJobNotFound {
+	if err := s.RequeueDeadJob(ctx, AnyTenant, "no-such-job"); err != ErrJobNotFound {
 		t.Fatalf("RequeueDeadJob(missing): got %v, want ErrJobNotFound", err)
 	}
 }

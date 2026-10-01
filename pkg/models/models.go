@@ -87,9 +87,14 @@ type Task struct {
 // task_queue column's own default in migrations/001.
 const DefaultQueue = "default"
 
+// DefaultTenant owns every job written before tenants existed, and is who the
+// keys in CONDUIT_API_KEYS act for.
+const DefaultTenant = "default"
+
 // Job is the durable execution record that moves through the state machine.
 type Job struct {
 	ID             string     `json:"id"`
+	TenantID       string     `json:"tenant_id"`
 	IdempotencyKey string     `json:"idempotency_key,omitempty"`
 	Task           Task       `json:"task"`
 	State          JobState   `json:"state"`
@@ -116,11 +121,12 @@ type Job struct {
 // keeps replicas from firing the same instant twice. See
 // store.ScheduleStore.AdvanceSchedule.
 type Schedule struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Cron    string `json:"cron"`
-	Task    Task   `json:"task"`
-	Enabled bool   `json:"enabled"`
+	ID       string `json:"id"`
+	TenantID string `json:"tenant_id"`
+	Name     string `json:"name"`
+	Cron     string `json:"cron"`
+	Task     Task   `json:"task"`
+	Enabled  bool   `json:"enabled"`
 
 	NextRunAt time.Time  `json:"next_run_at"`
 	LastRunAt *time.Time `json:"last_run_at,omitempty"`

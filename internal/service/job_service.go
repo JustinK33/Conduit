@@ -36,8 +36,11 @@ func NewJobService(kafka Publisher, s store.JobStore, r *retry.Engine, topic str
 }
 
 func (s *JobService) Enqueue(ctx context.Context, job models.Job) (string, error) {
+	if job.TenantID == "" {
+		job.TenantID = models.DefaultTenant
+	}
 	if job.IdempotencyKey != "" {
-		existing, err := s.store.GetJobByIdempotencyKey(ctx, job.IdempotencyKey)
+		existing, err := s.store.GetJobByIdempotencyKey(ctx, job.TenantID, job.IdempotencyKey)
 		if err == nil {
 			return existing.ID, nil
 		}
@@ -69,7 +72,7 @@ func (s *JobService) Enqueue(ctx context.Context, job models.Job) (string, error
 
 	if err := s.store.CreateJob(ctx, job); err != nil {
 		if errors.Is(err, store.ErrDuplicateIdempotencyKey) && job.IdempotencyKey != "" {
-			existing, lookupErr := s.store.GetJobByIdempotencyKey(ctx, job.IdempotencyKey)
+			existing, lookupErr := s.store.GetJobByIdempotencyKey(ctx, job.TenantID, job.IdempotencyKey)
 			if lookupErr != nil {
 				return "", fmt.Errorf("service: lookup duplicate idempotency key: %w", lookupErr)
 			}
@@ -92,19 +95,18 @@ func (s *JobService) Enqueue(ctx context.Context, job models.Job) (string, error
 	return job.ID, nil
 }
 
-func (s *JobService) Cancel(ctx context.Context, id string) error {
-	if err := s.store.CancelJob(ctx, id); err != nil {
+func (s *JobService) Cancel(ctx context.Context, tenant, id string) error {
+	if err := s.store.CancelJob(ctx, tenant, id); err != nil {
 		return fmt.Errorf("service: cancel job %s: %w", id, err)
 	}
 	return nil
 }
 
-// Claim hands the next due job in one of the named queues to a caller and
-// returns it with its lease token. An empty queues slice claims from any queue.
-// lease is the caller's request, clamped to the server's configured maximum so
-// a worker cannot park a job for a week.
-func (s *JobService) Claim(ctx context.Context, queues []string, lease time.Duration) (models.Job, error) {
-	job, err := s.store.ClaimNextJob(ctx, s.clampLease(lease), queues)
+// Claim hands the next due job matching filter to a caller and returns it with
+// its lease token. lease is the caller's request, clamped to the server's
+// configured maximum so a worker cannot park a job for a week.
+func (s *JobService) Claim(ctx context.Context, filter store.ClaimFilter, lease time.Duration) (models.Job, error) {
+	job, err := s.store.ClaimNextJob(ctx, s.clampLease(lease), filter)
 	if err != nil {
 		if errors.Is(err, store.ErrJobNotFound) {
 			return models.Job{}, err
@@ -151,7 +153,7 @@ func (s *JobService) Complete(ctx context.Context, id, leaseToken string, meta m
 // permanent is the caller saying "do not retry this whatever the policy says",
 // which is what retry.ErrNoRetry means in-process.
 func (s *JobService) Fail(ctx context.Context, id, leaseToken, errMsg string, permanent bool) (models.Job, error) {
-	job, err := s.store.GetJob(ctx, id)
+	job, err := s.store.GetJob(ctx, store.AnyTenant, id)
 	if err != nil {
 		return models.Job{}, fmt.Errorf("service: load job %s: %w", id, err)
 	}

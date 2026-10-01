@@ -37,10 +37,10 @@ type workerQueue struct {
 }
 
 func (w *workerQueue) Enqueue(context.Context, models.Job) (string, error) { return "", nil }
-func (w *workerQueue) Cancel(context.Context, string) error                { return nil }
+func (w *workerQueue) Cancel(context.Context, string, string) error        { return nil }
 
-func (w *workerQueue) Claim(_ context.Context, queues []string, lease time.Duration) (models.Job, error) {
-	w.claimQueues = queues
+func (w *workerQueue) Claim(_ context.Context, filter store.ClaimFilter, lease time.Duration) (models.Job, error) {
+	w.claimQueues = filter.Queues
 	w.claimLease = lease
 	return w.claimJob, w.claimErr
 }

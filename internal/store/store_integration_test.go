@@ -86,7 +86,7 @@ func TestJobRoundTripWithoutIdempotencyKey(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE id = $1", table), id)
 	})
 
-	got, err := s.GetJob(ctx, id)
+	got, err := s.GetJob(ctx, AnyTenant, id)
 	if err != nil {
 		t.Fatalf("GetJob on a job with NULL idempotency_key: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestJobRoundTripWithoutIdempotencyKey(t *testing.T) {
 
 	// ClaimNextJob shares scanJob, and this is the call the reconciler makes
 	// every tick.
-	claimed, err := s.ClaimNextJob(ctx, time.Minute, nil)
+	claimed, err := s.ClaimNextJob(ctx, time.Minute, ClaimFilter{})
 	if err != nil {
 		t.Fatalf("ClaimNextJob: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestClaimNextJobQueueFilter(t *testing.T) {
 				_, _ = pool.Exec(context.Background(), fmt.Sprintf("DELETE FROM %s WHERE id = $1", table), id)
 			})
 
-			claimed, err := s.ClaimNextJob(ctx, time.Minute, tc.filter)
+			claimed, err := s.ClaimNextJob(ctx, time.Minute, ClaimFilter{Queues: tc.filter})
 			if tc.wantClaim {
 				if err != nil {
 					t.Fatalf("ClaimNextJob: %v", err)
@@ -316,7 +316,7 @@ func TestCompleteClaimedJob(t *testing.T) {
 			}
 
 			if tc.wantErr == nil {
-				got, err := s.GetJob(ctx, id)
+				got, err := s.GetJob(ctx, AnyTenant, id)
 				if err != nil {
 					t.Fatalf("GetJob: %v", err)
 				}
@@ -344,7 +344,7 @@ func TestCompleteClaimedJob(t *testing.T) {
 				}
 			} else if tc.wantErr == ErrLeaseLost {
 				// Verify row unchanged
-				got, err := s.GetJob(ctx, id)
+				got, err := s.GetJob(ctx, AnyTenant, id)
 				if err != nil {
 					t.Fatalf("GetJob: %v", err)
 				}
@@ -506,7 +506,7 @@ func TestFailClaimedJob(t *testing.T) {
 				t.Fatalf("FailClaimedJob: got error %v, want %v", err, tc.wantErr)
 			}
 
-			got, err := s.GetJob(ctx, id)
+			got, err := s.GetJob(ctx, AnyTenant, id)
 			if err != nil {
 				t.Fatalf("GetJob: %v", err)
 			}
@@ -564,7 +564,7 @@ func TestReleaseClaimDefersTheJob(t *testing.T) {
 		t.Fatalf("CreateJob: %v", err)
 	}
 
-	job, err := s.ClaimNextJob(ctx, time.Minute, nil)
+	job, err := s.ClaimNextJob(ctx, time.Minute, ClaimFilter{})
 	if err != nil {
 		t.Fatalf("ClaimNextJob: %v", err)
 	}
@@ -575,7 +575,7 @@ func TestReleaseClaimDefersTheJob(t *testing.T) {
 		t.Fatalf("ReleaseClaim: %v", err)
 	}
 
-	got, err := s.GetJob(ctx, id)
+	got, err := s.GetJob(ctx, AnyTenant, id)
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
@@ -600,5 +600,61 @@ func TestReleaseClaimDefersTheJob(t *testing.T) {
 	}
 	if got.LeaseToken != "" {
 		t.Errorf("lease_token = %q, want empty", got.LeaseToken)
+	}
+}
+
+// Two tenants share the table and neither can read, list, cancel, requeue, or
+// claim the other's job. The reconciler's AnyTenant claim still sees both.
+func TestTenantIsolation(t *testing.T) {
+	ctx, pool := testPool(t)
+	table := claimTestTable(ctx, t, pool)
+	s := NewPostgresStore(pool, table)
+
+	due := time.Now().UTC().Add(-time.Minute)
+	for _, tenant := range []string{"acme", "globex"} {
+		job := models.Job{
+			ID:             tenant + "-job",
+			TenantID:       tenant,
+			IdempotencyKey: "same-key",
+			Task:           models.Task{ID: tenant, Name: "probe", Queue: "default"},
+			State:          models.JobStatePending,
+			ScheduledAt:    &due,
+		}
+		if err := s.CreateJob(ctx, job); err != nil {
+			t.Fatalf("CreateJob(%s): %v", tenant, err)
+		}
+	}
+
+	if _, err := s.GetJob(ctx, "globex", "acme-job"); err != ErrJobNotFound {
+		t.Errorf("GetJob across tenants: got %v, want ErrJobNotFound", err)
+	}
+	if got, err := s.GetJobByIdempotencyKey(ctx, "globex", "same-key"); err != nil || got.ID != "globex-job" {
+		t.Errorf("GetJobByIdempotencyKey(globex) = %q, %v, want globex-job", got.ID, err)
+	}
+	if err := s.CancelJob(ctx, "globex", "acme-job"); err != ErrJobNotFound {
+		t.Errorf("CancelJob across tenants: got %v, want ErrJobNotFound", err)
+	}
+	if err := s.RequeueDeadJob(ctx, "globex", "acme-job"); err != ErrJobNotFound {
+		t.Errorf("RequeueDeadJob across tenants: got %v, want ErrJobNotFound", err)
+	}
+
+	jobs, _, err := s.ListJobs(ctx, ListFilter{Tenant: "globex"})
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != "globex-job" {
+		t.Errorf("ListJobs(globex) = %v, want only globex-job", jobs)
+	}
+
+	claimed, err := s.ClaimNextJob(ctx, time.Minute, ClaimFilter{Tenant: "globex"})
+	if err != nil || claimed.ID != "globex-job" {
+		t.Fatalf("ClaimNextJob(globex) = %q, %v, want globex-job", claimed.ID, err)
+	}
+	if _, err := s.ClaimNextJob(ctx, time.Minute, ClaimFilter{Tenant: "globex"}); err != ErrJobNotFound {
+		t.Errorf("second ClaimNextJob(globex): got %v, want ErrJobNotFound", err)
+	}
+	claimed, err = s.ClaimNextJob(ctx, time.Minute, ClaimFilter{Tenant: AnyTenant})
+	if err != nil || claimed.ID != "acme-job" || claimed.TenantID != "acme" {
+		t.Errorf("ClaimNextJob(any) = %q/%q, %v, want acme-job/acme", claimed.ID, claimed.TenantID, err)
 	}
 }
