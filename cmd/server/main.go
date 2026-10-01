@@ -79,7 +79,7 @@ func bootstrap(ctx context.Context) (models.Config, zerolog.Logger, *pgxpool.Poo
 
 	cfg, err := config.Load()
 	if err != nil {
-		return cfg, nolog, nil, fmt.Errorf("config: %w", err)
+		return cfg, nolog, nil, err
 	}
 
 	log, err := logger.New(logger.Config{
