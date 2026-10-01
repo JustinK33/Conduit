@@ -16,6 +16,22 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: conduit
+          POSTGRES_PASSWORD: conduit
+          POSTGRES_DB: conduit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U conduit"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      POSTGRES_TEST_DSN: postgres://conduit:conduit@localhost:5432/conduit?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +46,12 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Unit tests
+      - name: Migrate
+        run: go run ./cmd/server migrate
+        env:
+          CONDUIT_POSTGRES_DSN: ${{ env.POSTGRES_TEST_DSN }}
+
+      - name: Tests
         run: go test ./...
 
       - name: Race detector
