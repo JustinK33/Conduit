@@ -45,7 +45,7 @@ func NewScheduleStore(pool *pgxpool.Pool, tableName string) *ScheduleStore {
 
 const scheduleColumns = `id, name, cron_expr,
 	task_name, task_queue, task_payload, task_max_retries, task_timeout_ns, task_metadata,
-	enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, tenant_id`
+	enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, tenant_id, task_priority`
 
 // CreateSchedule inserts a schedule and returns it as stored, with the id and
 // timestamps filled in. The caller supplies the cron expression and the first
@@ -81,8 +81,8 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sched models.Schedul
 		INSERT INTO %s (
 			id, name, cron_expr,
 			task_name, task_queue, task_payload, task_max_retries, task_timeout_ns, task_metadata,
-			enabled, next_run_at, created_at, updated_at, tenant_id
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, s.TableName)
+			enabled, next_run_at, created_at, updated_at, tenant_id, task_priority
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, s.TableName)
 
 	_, err = s.Pool.Exec(ctx, query,
 		sched.ID,
@@ -99,6 +99,7 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sched models.Schedul
 		sched.CreatedAt,
 		sched.UpdatedAt,
 		sched.TenantID,
+		sched.Task.Priority,
 	)
 	if isUniqueViolation(err) {
 		return models.Schedule{}, ErrDuplicateSchedule
@@ -226,6 +227,7 @@ func scanSchedule(ctx context.Context, row pgx.Row) (models.Schedule, error) {
 		&sched.CreatedAt,
 		&sched.UpdatedAt,
 		&sched.TenantID,
+		&sched.Task.Priority,
 	)
 	if err != nil {
 		return models.Schedule{}, err

@@ -90,10 +90,10 @@ func (s *PostgresStore) CreateJob(ctx context.Context, job models.Job) error {
 			task_cron_expr, task_queue, task_metadata,
 			state, attempt, last_error,
 			scheduled_at, started_at, lease_expires_at, lease_token, completed_at,
-			created_at, updated_at, metadata, tenant_id
+			created_at, updated_at, metadata, tenant_id, task_priority
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-			$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
+			$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
 		)`, s.TableName)
 
 	_, err = s.Pool.Exec(ctx, query,
@@ -120,6 +120,7 @@ func (s *PostgresStore) CreateJob(ctx context.Context, job models.Job) error {
 		job.UpdatedAt,
 		metaBytes,
 		job.TenantID,
+		job.Task.Priority,
 	)
 	if isIdempotencyUniqueViolation(err) {
 		return ErrDuplicateIdempotencyKey
@@ -135,7 +136,7 @@ func (s *PostgresStore) GetJob(ctx context.Context, tenant, id string) (models.J
 			task_cron_expr, task_queue, task_metadata,
 			state, attempt, last_error,
 			scheduled_at, started_at, lease_expires_at, lease_token, completed_at,
-			created_at, updated_at, metadata, tenant_id
+			created_at, updated_at, metadata, tenant_id, task_priority
 		FROM %s WHERE id = $1 AND ($2 = '' OR tenant_id = $2)`, s.TableName)
 
 	job, err := scanJob(ctx, s.Pool.QueryRow(ctx, query, id, tenant))
@@ -156,7 +157,7 @@ func (s *PostgresStore) GetJobByIdempotencyKey(ctx context.Context, tenant, key 
 			task_cron_expr, task_queue, task_metadata,
 			state, attempt, last_error,
 			scheduled_at, started_at, lease_expires_at, lease_token, completed_at,
-			created_at, updated_at, metadata, tenant_id
+			created_at, updated_at, metadata, tenant_id, task_priority
 		FROM %s WHERE idempotency_key = $1 AND ($2 = '' OR tenant_id = $2)`, s.TableName)
 
 	job, err := scanJob(ctx, s.Pool.QueryRow(ctx, query, key, tenant))
@@ -279,7 +280,7 @@ func (s *PostgresStore) ClaimNextJob(ctx context.Context, leaseDuration time.Dur
 			  AND (scheduled_at IS NULL OR scheduled_at <= NOW())
 			  AND ($5::text[] IS NULL OR task_queue = ANY($5))
 			  AND ($6 = '' OR tenant_id = $6)
-			ORDER BY scheduled_at ASC NULLS LAST
+			ORDER BY task_priority DESC, scheduled_at ASC NULLS LAST
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
@@ -298,7 +299,7 @@ func (s *PostgresStore) ClaimNextJob(ctx context.Context, leaseDuration time.Dur
 			jobs.task_cron_expr, jobs.task_queue, jobs.task_metadata,
 			jobs.state, jobs.attempt, jobs.last_error,
 			jobs.scheduled_at, jobs.started_at, jobs.lease_expires_at, jobs.lease_token, jobs.completed_at,
-			jobs.created_at, jobs.updated_at, jobs.metadata, jobs.tenant_id`, s.TableName, s.TableName)
+			jobs.created_at, jobs.updated_at, jobs.metadata, jobs.tenant_id, jobs.task_priority`, s.TableName, s.TableName)
 
 	job, err := scanJob(ctx, s.Pool.QueryRow(ctx, query, now, leaseExpiresAt, leaseToken, now, queueParam, filter.Tenant))
 	if err != nil {
@@ -571,7 +572,7 @@ func (s *PostgresStore) CompleteClaimedJob(ctx context.Context, id, leaseToken s
 			task_cron_expr, task_queue, task_metadata,
 			state, attempt, last_error,
 			scheduled_at, started_at, lease_expires_at, lease_token, completed_at,
-			created_at, updated_at, metadata, tenant_id`, s.TableName)
+			created_at, updated_at, metadata, tenant_id, task_priority`, s.TableName)
 
 	job, err := scanJob(ctx, s.Pool.QueryRow(ctx, query, metaBytes, id, leaseToken))
 	if err != nil {
@@ -667,7 +668,7 @@ func (s *PostgresStore) ListJobs(ctx context.Context, filter ListFilter) ([]mode
 			task_cron_expr, task_queue, task_metadata,
 			state, attempt, last_error,
 			scheduled_at, started_at, lease_expires_at, lease_token, completed_at,
-			created_at, updated_at, metadata, tenant_id
+			created_at, updated_at, metadata, tenant_id, task_priority
 		FROM %s
 		WHERE %s
 		ORDER BY created_at DESC, id DESC
@@ -744,6 +745,7 @@ func scanJob(ctx context.Context, row pgx.Row) (models.Job, error) {
 		&job.UpdatedAt,
 		&metaJSON,
 		&job.TenantID,
+		&job.Task.Priority,
 	)
 	if err != nil {
 		return models.Job{}, err

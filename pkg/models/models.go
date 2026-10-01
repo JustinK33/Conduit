@@ -81,6 +81,9 @@ type Task struct {
 	// DefaultQueue on enqueue.
 	Queue    string            `json:"queue,omitempty"`
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// Priority orders claims within a queue, higher first. Ties go to the
+	// earliest scheduled_at.
+	Priority int `json:"priority,omitempty"`
 }
 
 // DefaultQueue is where a job goes when it names no queue. It matches the

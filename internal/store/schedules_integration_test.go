@@ -405,3 +405,32 @@ func TestSchedulesArePerTenant(t *testing.T) {
 		t.Errorf("DeleteSchedule across tenants: got %v, want ErrScheduleNotFound", err)
 	}
 }
+
+func TestClaimTakesHigherPriorityFirst(t *testing.T) {
+	ctx, pool := testPool(t)
+	s := NewPostgresStore(pool, claimTestTable(ctx, t, pool))
+	earlier := time.Now().UTC().Add(-time.Minute)
+	now := time.Now().UTC()
+
+	for id, job := range map[string]models.Job{
+		"old-low":  {ScheduledAt: &earlier},
+		"new-high": {ScheduledAt: &now, Task: models.Task{Priority: 5}},
+	} {
+		job.ID = id
+		job.Task.ID, job.Task.Name, job.Task.Queue = id, "webhook", "default"
+		job.State, job.CreatedAt = models.JobStatePending, now
+		if err := s.CreateJob(ctx, job); err != nil {
+			t.Fatalf("CreateJob(%s): %v", id, err)
+		}
+	}
+
+	for _, want := range []string{"new-high", "old-low"} {
+		got, err := s.ClaimNextJob(ctx, time.Minute, ClaimFilter{})
+		if err != nil {
+			t.Fatalf("ClaimNextJob: %v", err)
+		}
+		if got.ID != want {
+			t.Errorf("claimed %s, want %s", got.ID, want)
+		}
+	}
+}
