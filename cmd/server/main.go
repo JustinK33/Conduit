@@ -403,7 +403,7 @@ func run(ctx context.Context) error {
 	schedHandler := api.NewScheduleHandler(scheduleStore, logger.WithComponent(log, "api"), cfg.HTTP.APIKeys)
 	schedHandler.Keys = keyStore
 	schedHandler.RegisterRoutes(router)
-	router.GET("/metrics", gin.WrapH(reg.Handler()))
+	router.GET("/metrics", api.TokenAuth(cfg.Metrics.Token), gin.WrapH(reg.Handler()))
 	router.GET("/live", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})

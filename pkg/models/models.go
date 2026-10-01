@@ -222,6 +222,8 @@ type MetricsConfig struct {
 	Namespace     string
 	Subsystem     string
 	ListenAddress string
+	// Token, when set, is the bearer token /metrics requires.
+	Token string
 }
 
 type LoggerConfig struct {

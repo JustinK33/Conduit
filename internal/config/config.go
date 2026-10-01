@@ -208,6 +208,7 @@ func LoadFromEnvironment(env Environment) (models.Config, error) {
 	p.str("METRICS_NAMESPACE", &cfg.Metrics.Namespace)
 	p.str("METRICS_SUBSYSTEM", &cfg.Metrics.Subsystem)
 	p.str("METRICS_LISTEN_ADDRESS", &cfg.Metrics.ListenAddress)
+	p.str("METRICS_TOKEN", &cfg.Metrics.Token)
 
 	p.str("LOG_LEVEL", &cfg.Logger.Level)
 	p.str("LOG_FORMAT", &cfg.Logger.Format)
@@ -272,6 +273,9 @@ func Validate(cfg models.Config) error {
 		if len(key) < 16 {
 			return fmt.Errorf("config: CONDUIT_API_KEYS must be at least 16 characters each, got one with length %d", len(key))
 		}
+	}
+	if t := cfg.Metrics.Token; t != "" && len(t) < 16 {
+		return fmt.Errorf("config: CONDUIT_METRICS_TOKEN must be at least 16 characters, got %d", len(t))
 	}
 	if (cfg.HTTP.TLSCertFile == "") != (cfg.HTTP.TLSKeyFile == "") {
 		return fmt.Errorf("config: CONDUIT_TLS_CERT_FILE and CONDUIT_TLS_KEY_FILE must be set together")

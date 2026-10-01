@@ -489,3 +489,23 @@ func TestSQLETLIsDefaultTenantOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenAuth(t *testing.T) {
+	router := gin.New()
+	router.GET("/open", TokenAuth(""), func(c *gin.Context) { c.Status(http.StatusOK) })
+	router.GET("/metrics", TokenAuth("scrape-token"), func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for _, tc := range []struct {
+		path, bearer string
+		want         int
+	}{
+		{"/open", "", http.StatusOK},
+		{"/metrics", "", http.StatusUnauthorized},
+		{"/metrics", "wrong", http.StatusUnauthorized},
+		{"/metrics", "scrape-token", http.StatusOK},
+	} {
+		if rec := do(router, http.MethodGet, tc.path, "", tc.bearer); rec.Code != tc.want {
+			t.Errorf("GET %s with %q: status = %d, want %d", tc.path, tc.bearer, rec.Code, tc.want)
+		}
+	}
+}

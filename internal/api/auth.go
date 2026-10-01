@@ -107,6 +107,19 @@ func tenantOf(c *gin.Context) string {
 	return models.DefaultTenant
 }
 
+// TokenAuth requires one fixed bearer token, or nothing when token is empty.
+// It guards /metrics, which tells anyone who can read it every task name.
+func TokenAuth(token string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		got := bearerToken(c.GetHeader("Authorization"))
+		if token != "" && subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+			RespondError(c, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
+			return
+		}
+		c.Next()
+	}
+}
+
 func bearerToken(header string) string {
 	const prefix = "Bearer "
 	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
