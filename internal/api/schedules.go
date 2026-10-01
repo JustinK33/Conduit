@@ -30,6 +30,7 @@ type ScheduleHandler struct {
 	Store   ScheduleStore
 	Logger  zerolog.Logger
 	APIKeys []string
+	Keys    KeyLookup
 }
 
 func NewScheduleHandler(schedules ScheduleStore, logger zerolog.Logger, apiKeys []string) *ScheduleHandler {
@@ -37,7 +38,7 @@ func NewScheduleHandler(schedules ScheduleStore, logger zerolog.Logger, apiKeys 
 }
 
 func (h *ScheduleHandler) RegisterRoutes(router gin.IRouter) {
-	g := router.Group("/api/schedules", APIKeyAuth(h.APIKeys))
+	g := router.Group("/api/schedules", APIKeyAuth(h.APIKeys, h.Keys))
 	g.POST("", h.CreateSchedule)
 	g.GET("", h.ListSchedules)
 	g.DELETE("/:id", h.DeleteSchedule)

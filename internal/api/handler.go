@@ -31,8 +31,9 @@ type Handler struct {
 	Store   store.JobStore
 	Logger  zerolog.Logger
 	Metrics *metrics.Registry
-	// APIKeys guards the /api/jobs group. Empty means the API is open.
+	// APIKeys and Keys guard the /api/jobs group. See APIKeyAuth.
 	APIKeys []string
+	Keys    KeyLookup
 }
 
 type EnqueueRequest struct {
@@ -57,7 +58,7 @@ func (h *Handler) RegisterRoutes(router gin.IRouter) {
 	router.Use(RequestID(h.Logger), RequestLogger(), Recovery(), h.metricsMiddleware())
 	// Auth mounts on the group, not the router: cmd/server registers /metrics,
 	// /live, /ready, and /health on the root and those must stay reachable.
-	g := router.Group("/api/jobs", APIKeyAuth(h.APIKeys))
+	g := router.Group("/api/jobs", APIKeyAuth(h.APIKeys, h.Keys))
 	g.POST("", h.EnqueueJob)
 	g.GET("", h.ListJobs)
 	g.GET("/by-idempotency-key/:key", h.GetJobByIdempotencyKey)

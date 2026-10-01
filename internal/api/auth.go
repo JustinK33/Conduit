@@ -1,35 +1,37 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/JustinK33/Conduit/internal/store"
 	"github.com/JustinK33/Conduit/pkg/models"
 	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog"
 )
 
-// APIKeyAuth requires `Authorization: Bearer <key>` where key is one of keys.
-//
-// An empty key list returns a pass-through, which is what makes auth opt-in:
-// an existing deployment, the load tests, and CI keep working unchanged, and
-// the server warns at boot that the API is open.
-//
-// This mounts on the /api/jobs group, never on the root router. /live, /ready,
-// /health, and /metrics are registered on the root by cmd/server, and putting
-// auth in that chain would 401 the Kubernetes probes and the Prometheus scrape.
-// Keeping those endpoints unauthenticated is deliberate, which makes the
-// reverse proxy in front responsible for keeping them off the public internet.
-// See docs/DEPLOYMENT.md.
-//
-// One shared key means no per-caller identity: holding it means being able to
-// claim, cancel, and read every job in the instance. Per-tenant keys are phase
-// 2 in docs/ROADMAP.md.
-func APIKeyAuth(keys []string) gin.HandlerFunc {
-	if len(keys) == 0 {
-		return func(c *gin.Context) { c.Next() }
-	}
+// KeyLookup resolves the keys issued with `conduit keys`. *store.KeyStore is
+// the implementation; nil means only CONDUIT_API_KEYS count.
+type KeyLookup interface {
+	TenantForKey(ctx context.Context, key string) (string, error)
+	HasActiveKeys(ctx context.Context) (bool, error)
+}
 
+// APIKeyAuth requires `Authorization: Bearer <key>` and records which tenant
+// the key acts for. A key from keys acts for the default tenant; anything else
+// is looked up in lookup.
+//
+// Auth is opt-in: with no keys and no live issued key the API is open and
+// every request acts for the default tenant, which keeps the quickstart, the
+// load tests, and CI working unchanged. The server warns at boot when that is
+// the case.
+//
+// This mounts on the /api groups, never on the root router, so the probes and
+// the Prometheus scrape stay reachable. See docs/DEPLOYMENT.md.
+func APIKeyAuth(keys []string, lookup KeyLookup) gin.HandlerFunc {
 	// Pre-convert once so the comparison below does no allocation per request.
 	expected := make([][]byte, 0, len(keys))
 	for _, k := range keys {
@@ -37,25 +39,59 @@ func APIKeyAuth(keys []string) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
-		presented := []byte(bearerToken(c.GetHeader("Authorization")))
-		if len(presented) == 0 {
+		ctx := c.Request.Context()
+		presented := bearerToken(c.GetHeader("Authorization"))
+
+		if presented != "" {
+			// Constant-time comparison against every key, with no early exit, so
+			// response timing does not leak which key matched or how far it matched.
+			var ok int
+			for _, want := range expected {
+				ok |= subtle.ConstantTimeCompare([]byte(presented), want)
+			}
+			if ok == 1 {
+				c.Set(tenantKey, models.DefaultTenant)
+				c.Next()
+				return
+			}
+			if lookup != nil {
+				tenant, err := lookup.TenantForKey(ctx, presented)
+				if err == nil {
+					c.Set(tenantKey, tenant)
+					c.Next()
+					return
+				}
+				if !errors.Is(err, store.ErrKeyNotFound) {
+					zerolog.Ctx(ctx).Error().Err(err).Msg("api key lookup failed")
+					RespondError(c, http.StatusInternalServerError, "internal_error", "failed to check api key")
+					return
+				}
+			}
+		}
+
+		open := len(expected) == 0
+		if open && lookup != nil {
+			// ponytail: one EXISTS per unauthenticated request, cache it if an
+			// open instance ever takes enough traffic to notice.
+			active, err := lookup.HasActiveKeys(ctx)
+			if err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).Msg("api key lookup failed")
+				RespondError(c, http.StatusInternalServerError, "internal_error", "failed to check api key")
+				return
+			}
+			open = !active
+		}
+		if open {
+			c.Set(tenantKey, models.DefaultTenant)
+			c.Next()
+			return
+		}
+
+		if presented == "" {
 			RespondError(c, http.StatusUnauthorized, "unauthorized", "missing bearer token")
 			return
 		}
-
-		// Constant-time comparison against every key, with no early exit, so
-		// response timing does not leak which key matched or how far it matched.
-		var ok int
-		for _, want := range expected {
-			ok |= subtle.ConstantTimeCompare(presented, want)
-		}
-		if ok != 1 {
-			RespondError(c, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
-			return
-		}
-
-		c.Set(tenantKey, models.DefaultTenant)
-		c.Next()
+		RespondError(c, http.StatusUnauthorized, "unauthorized", "invalid bearer token")
 	}
 }
 

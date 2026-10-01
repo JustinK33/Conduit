@@ -389,11 +389,15 @@ func run(ctx context.Context) error {
 		log.Warn().Msg("API keys are bearer tokens and this server speaks plain HTTP: terminate TLS in front of it or the keys transit in clear (see docs/DEPLOYMENT.md)")
 	}
 
+	keyStore := store.NewKeyStore(pgPool)
 	handler := api.NewHandler(jobSvc, jobStore, logger.WithComponent(log, "api"), reg, cfg.HTTP.APIKeys)
+	handler.Keys = keyStore
 	handler.RegisterRoutes(router)
 	// Its own handler with its own routes, mounted on the same router so it
 	// inherits the middleware stack and the same API key auth.
-	api.NewScheduleHandler(scheduleStore, logger.WithComponent(log, "api"), cfg.HTTP.APIKeys).RegisterRoutes(router)
+	schedHandler := api.NewScheduleHandler(scheduleStore, logger.WithComponent(log, "api"), cfg.HTTP.APIKeys)
+	schedHandler.Keys = keyStore
+	schedHandler.RegisterRoutes(router)
 	router.GET("/metrics", gin.WrapH(reg.Handler()))
 	router.GET("/live", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})

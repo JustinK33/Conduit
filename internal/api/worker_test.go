@@ -21,6 +21,7 @@ type workerQueue struct {
 	claimJob    models.Job
 	claimErr    error
 	claimQueues []string
+	claimTenant string
 	claimLease  time.Duration
 
 	heartbeatExpires time.Time
@@ -41,6 +42,7 @@ func (w *workerQueue) Cancel(context.Context, string, string) error        { ret
 
 func (w *workerQueue) Claim(_ context.Context, filter store.ClaimFilter, lease time.Duration) (models.Job, error) {
 	w.claimQueues = filter.Queues
+	w.claimTenant = filter.Tenant
 	w.claimLease = lease
 	return w.claimJob, w.claimErr
 }
@@ -378,6 +380,55 @@ func TestAPIKeyAuth(t *testing.T) {
 
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+// fakeKeys is the issued-key table: key to tenant, with revoked keys absent.
+type fakeKeys map[string]string
+
+func (f fakeKeys) TenantForKey(_ context.Context, key string) (string, error) {
+	if t, ok := f[key]; ok {
+		return t, nil
+	}
+	return "", store.ErrKeyNotFound
+}
+
+func (f fakeKeys) HasActiveKeys(context.Context) (bool, error) { return len(f) > 0, nil }
+
+func TestAPIKeyAuthWithIssuedKeys(t *testing.T) {
+	const envKey = "0123456789abcdef0123456789abcdef"
+
+	tests := []struct {
+		name       string
+		env        []string
+		issued     fakeKeys
+		bearer     string
+		wantStatus int
+		wantTenant string
+	}{
+		{name: "an issued key acts for its tenant", issued: fakeKeys{"ck_acme": "acme"}, bearer: "ck_acme", wantStatus: http.StatusNoContent, wantTenant: "acme"},
+		{name: "an env key acts for the default tenant", env: []string{envKey}, issued: fakeKeys{"ck_acme": "acme"}, bearer: envKey, wantStatus: http.StatusNoContent, wantTenant: models.DefaultTenant},
+		{name: "a live issued key turns auth on", issued: fakeKeys{"ck_acme": "acme"}, wantStatus: http.StatusUnauthorized},
+		{name: "a revoked key is rejected", issued: fakeKeys{"ck_other": "acme"}, bearer: "ck_acme", wantStatus: http.StatusUnauthorized},
+		{name: "with every key revoked the api is open again", issued: fakeKeys{}, wantStatus: http.StatusNoContent, wantTenant: models.DefaultTenant},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			q := &workerQueue{claimErr: store.ErrJobNotFound}
+			h := NewHandler(q, mockStore{}, zerolog.Nop(), testRegistry(), tc.env)
+			h.Keys = tc.issued
+			router := gin.New()
+			h.RegisterRoutes(router)
+
+			rec := do(router, http.MethodPost, "/api/jobs/claim", "", tc.bearer)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if q.claimTenant != tc.wantTenant {
+				t.Errorf("claimed as tenant %q, want %q", q.claimTenant, tc.wantTenant)
 			}
 		})
 	}
