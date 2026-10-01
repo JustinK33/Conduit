@@ -181,6 +181,9 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       # Override when 3000 is taken: GRAFANA_HOST_PORT=3001 make up
       - "${GRAFANA_HOST_PORT:-3000}:3000"
