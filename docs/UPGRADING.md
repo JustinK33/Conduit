@@ -2,20 +2,35 @@
 
 ## v0.4.0 to v0.5.0
 
+One response change: `GET /api/jobs` no longer includes payloads.
+Every other request and response is a superset of v0.4.0, so a v0.2.0 or later client keeps working unless it reads payloads out of the list.
+
 **1. Run the migrations before starting the new image.**
 
 `migrations/006_tenants.sql` adds `tenant_id` to `jobs` and `schedules`, swaps three indexes for tenant-leading ones, and creates `api_keys`.
-Existing rows land in the `default` tenant.
+`migrations/007_priority.sql` adds `task_priority` and rebuilds the pending indexes around it.
+Existing rows land in the `default` tenant with priority 0, so their claim order does not change.
 The server checks `api_keys` at boot, so an unmigrated database stops it from starting.
 
-**2. Idempotency keys and schedule names are now unique per tenant.**
+**2. Job lists leave out payloads.**
+
+Add `?include=payload` to `GET /api/jobs` if something reads them from there.
+`GET /api/jobs/:id` still returns the payload.
+
+**3. Idempotency keys and schedule names are now unique per tenant.**
 
 Nothing changes for a deployment that only uses `CONDUIT_API_KEYS`, because all of those keys act for `default`.
 
-**3. Issuing a key turns auth on.**
+**4. Issuing a key turns auth on.**
 
 An instance with `CONDUIT_API_KEYS` unset stays open until the first `conduit keys create`.
 After that every `/api` request needs a key.
+
+**5. Smaller things.**
+
+- `CONDUIT_HTTP_WRITE_TIMEOUT` defaults to `30s`, up from `15s`, so a long-poll claim can wait its full 25 seconds. If you set it yourself, keep it above 27 seconds or long-polls get shorter.
+- An instance with `CONDUIT_RECONCILER_ENABLED=false` now holds one extra Postgres connection for `LISTEN`, which is what wakes its long-poll claims.
+- A taken HTTP port now stops the process with an error. It used to log and keep running with no API.
 
 ## v0.3.1 to v0.4.0
 
