@@ -55,11 +55,11 @@ docker run -d --name conduit-pg --network conduit \
 DSN='postgres://conduit:conduit@conduit-pg:5432/conduit?sslmode=disable'
 
 docker run --rm --network conduit -e CONDUIT_POSTGRES_DSN="$DSN" \
-  ghcr.io/justink33/conduit:v0.3.1 migrate
+  ghcr.io/justink33/conduit:v0.4.0 migrate
 
 docker run -d --name conduit --network conduit -p 8080:8080 \
   -e CONDUIT_POSTGRES_DSN="$DSN" \
-  ghcr.io/justink33/conduit:v0.3.1
+  ghcr.io/justink33/conduit:v0.4.0
 ```
 
 ```bash
@@ -68,8 +68,9 @@ curl -X POST localhost:8080/api/jobs -H 'content-type: application/json' \
 ```
 
 `amd64` and `arm64` images are published, so that runs natively on an Apple Silicon or Graviton machine rather than under emulation.
-The tag is a pin: `:v0.3.1` never moves, `:latest` follows the newest release, and `:main` follows the tip of this branch.
-The v0.3 line changes defaults only and takes a v0.2.0 client unmodified; v0.2.0 changed the wire format, so a client written against v0.1.0 needs [docs/UPGRADING.md](docs/UPGRADING.md).
+The tag is a pin: `:v0.4.0` never moves, `:latest` follows the newest release, and `:main` follows the tip of this branch.
+A v0.2.0 or later client works against v0.4.0 unmodified, but v0.4.0 turns on retention by default, so read [docs/UPGRADING.md](docs/UPGRADING.md) before upgrading.
+A client written against v0.1.0 needs the same doc, because v0.2.0 changed the wire format.
 
 That quickstart is a local trial and not a deployment: the database password is `conduit`, there is no TLS, and `CONDUIT_API_KEYS` is unset so anything that can reach port 8080 can enqueue work.
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is the checklist for the real thing.
