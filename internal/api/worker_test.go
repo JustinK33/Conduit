@@ -458,3 +458,34 @@ func TestAPIKeyAuthDoesNotCoverRootRoutes(t *testing.T) {
 		t.Errorf("/api/jobs status = %d, want 401", rec.Code)
 	}
 }
+
+func TestSQLETLIsDefaultTenantOnly(t *testing.T) {
+	keys := fakeKeys{"ck_acme": "acme", "ck_ops": models.DefaultTenant}
+
+	jobs := NewHandler(&workerQueue{}, mockStore{}, zerolog.Nop(), testRegistry(), nil)
+	jobs.Keys = keys
+	schedules := NewScheduleHandler(&mockScheduleStore{}, zerolog.Nop(), nil)
+	schedules.Keys = keys
+	router := gin.New()
+	jobs.RegisterRoutes(router)
+	schedules.RegisterRoutes(router)
+
+	enqueue := `{"task":{"name":"sql.etl"}}`
+	schedule := `{"name":"nightly","cron":"0 3 * * *","task":{"name":"sql.etl"}}`
+
+	for _, tc := range []struct {
+		path, body, bearer string
+		want               int
+	}{
+		{"/api/jobs", enqueue, "ck_acme", http.StatusForbidden},
+		{"/api/jobs", enqueue, "ck_ops", http.StatusCreated},
+		{"/api/schedules", schedule, "ck_acme", http.StatusForbidden},
+		{"/api/schedules", schedule, "ck_ops", http.StatusCreated},
+		{"/api/jobs", `{"task":{"name":"webhook"}}`, "ck_acme", http.StatusCreated},
+	} {
+		if rec := do(router, http.MethodPost, tc.path, tc.body, tc.bearer); rec.Code != tc.want {
+			t.Errorf("POST %s %s as %s: status = %d, want %d: %s",
+				tc.path, tc.body, tc.bearer, rec.Code, tc.want, rec.Body.String())
+		}
+	}
+}

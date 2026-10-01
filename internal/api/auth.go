@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/JustinK33/Conduit/internal/etl"
 	"github.com/JustinK33/Conduit/internal/store"
 	"github.com/JustinK33/Conduit/pkg/models"
 	"github.com/gin-gonic/gin"
@@ -112,4 +113,14 @@ func bearerToken(header string) string {
 		return ""
 	}
 	return strings.TrimSpace(header[len(prefix):])
+}
+
+// taskAllowed keeps sql.etl to the default tenant. It runs SQL against the
+// operator's own databases, so a tenant key must not be able to reach it.
+func taskAllowed(c *gin.Context, name string) bool {
+	if name == etl.TaskName() && tenantOf(c) != models.DefaultTenant {
+		RespondError(c, http.StatusForbidden, "forbidden", name+" is only available to the default tenant")
+		return false
+	}
+	return true
 }

@@ -97,6 +97,9 @@ func (h *Handler) EnqueueJob(c *gin.Context) {
 		RespondError(c, http.StatusBadRequest, "invalid_request", "task.name is required")
 		return
 	}
+	if !taskAllowed(c, request.Task.Name) {
+		return
+	}
 
 	job := models.Job{
 		TenantID:       tenantOf(c),

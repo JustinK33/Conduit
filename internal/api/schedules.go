@@ -72,6 +72,9 @@ func (h *ScheduleHandler) CreateSchedule(c *gin.Context) {
 		RespondError(c, http.StatusBadRequest, "invalid_request", "task.name is required")
 		return
 	}
+	if !taskAllowed(c, request.Task.Name) {
+		return
+	}
 
 	// Parse now, not at fire time. An expression that cannot be parsed is a
 	// schedule that would log an error every tick forever and never run.
