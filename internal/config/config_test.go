@@ -330,3 +330,17 @@ func TestLoadFromEnvironmentUnsetMeansEmpty(t *testing.T) {
 		t.Errorf("unset WORKER_QUEUES should be empty, got %v", cfg.Worker.Queues)
 	}
 }
+
+func TestValidateTLSNeedsBothFiles(t *testing.T) {
+	cfg := Default()
+	cfg.Postgres.DSN = "postgres://localhost/conduit"
+
+	cfg.HTTP.TLSCertFile = "cert.pem"
+	if err := Validate(cfg); err == nil {
+		t.Error("a cert with no key was accepted")
+	}
+	cfg.HTTP.TLSKeyFile = "key.pem"
+	if err := Validate(cfg); err != nil {
+		t.Errorf("cert and key: %v", err)
+	}
+}

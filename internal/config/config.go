@@ -157,6 +157,8 @@ func LoadFromEnvironment(env Environment) (models.Config, error) {
 	p.dur("HTTP_IDLE_TIMEOUT", &cfg.HTTP.IdleTimeout)
 	p.strs("API_KEYS", &cfg.HTTP.APIKeys)
 	p.strs("TRUSTED_PROXIES", &cfg.HTTP.TrustedProxies)
+	p.str("TLS_CERT_FILE", &cfg.HTTP.TLSCertFile)
+	p.str("TLS_KEY_FILE", &cfg.HTTP.TLSKeyFile)
 
 	p.strs("KAFKA_BROKERS", &cfg.Kafka.Brokers)
 	p.str("KAFKA_TOPIC", &cfg.Kafka.Topic)
@@ -270,6 +272,9 @@ func Validate(cfg models.Config) error {
 		if len(key) < 16 {
 			return fmt.Errorf("config: CONDUIT_API_KEYS must be at least 16 characters each, got one with length %d", len(key))
 		}
+	}
+	if (cfg.HTTP.TLSCertFile == "") != (cfg.HTTP.TLSKeyFile == "") {
+		return fmt.Errorf("config: CONDUIT_TLS_CERT_FILE and CONDUIT_TLS_KEY_FILE must be set together")
 	}
 	return nil
 }

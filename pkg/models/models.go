@@ -145,6 +145,9 @@ type HTTPConfig struct {
 	// direct peer address and a forged X-Forwarded-For cannot poison the audit
 	// log. Set it to the reverse proxy's network to get real client addresses.
 	TrustedProxies []string
+	// TLSCertFile and TLSKeyFile turn on HTTPS. Both or neither.
+	TLSCertFile string
+	TLSKeyFile  string
 }
 
 type KafkaConfig struct {

@@ -389,10 +389,10 @@ func run(ctx context.Context) error {
 	}
 	if len(cfg.HTTP.APIKeys) == 0 && !issued {
 		log.Warn().Msg("no API keys: /api is unauthenticated until CONDUIT_API_KEYS is set or a key is issued with conduit keys create")
-	} else {
-		// The process cannot see what is in front of it, so this is
-		// unconditional rather than clever.
-		log.Warn().Msg("API keys are bearer tokens and this server speaks plain HTTP: terminate TLS in front of it or the keys transit in clear (see docs/DEPLOYMENT.md)")
+	} else if cfg.HTTP.TLSCertFile == "" {
+		// The process cannot see what is in front of it, so without its own
+		// cert this is unconditional rather than clever.
+		log.Warn().Msg("API keys are bearer tokens and this server speaks plain HTTP: set CONDUIT_TLS_CERT_FILE or terminate TLS in front of it (see docs/DEPLOYMENT.md)")
 	}
 
 	handler := api.NewHandler(jobSvc, jobStore, logger.WithComponent(log, "api"), reg, cfg.HTTP.APIKeys)
@@ -429,7 +429,11 @@ func run(ctx context.Context) error {
 	}
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Info().Str("addr", cfg.HTTP.Address).Msg("server listening")
+		log.Info().Str("addr", cfg.HTTP.Address).Bool("tls", cfg.HTTP.TLSCertFile != "").Msg("server listening")
+		if cfg.HTTP.TLSCertFile != "" {
+			serveErr <- srv.ServeTLS(ln, cfg.HTTP.TLSCertFile, cfg.HTTP.TLSKeyFile)
+			return
+		}
 		serveErr <- srv.Serve(ln)
 	}()
 
