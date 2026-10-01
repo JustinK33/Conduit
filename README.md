@@ -87,7 +87,7 @@ Working on Conduit itself, scheduling recurring work, or running your own worker
 - [docs/WORKERS.md](docs/WORKERS.md) is how you write a worker: the four endpoints, the lease and heartbeat contract, what to do when you lose a lease, and the exact request and response shapes.
 - [docs/DEVELOPING.md](docs/DEVELOPING.md) is the clone workflow: `make up`, the Make targets, testing, and the tech stack.
 - [docs/UPGRADING.md](docs/UPGRADING.md) is what to change per release. v0.2.0 broke the wire format, including the outbound webhook envelope, so a v0.1.0 client and any endpoint receiving Conduit webhooks both need a change.
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is the reverse proxy recipe, in Caddy and nginx, and why one is not optional: Conduit has no TLS and four endpoints that are deliberately unauthenticated.
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) covers serving TLS directly and the reverse proxy recipe, in Caddy and nginx, that is still recommended for rate limits.
 - [PROJECT.md](PROJECT.md) has the API surface with curl examples and response shapes, plus the config table.
 - [docs/FEATURES.md](docs/FEATURES.md) goes deep on four pieces: the async publish and its tradeoff, Redlock, the Kubernetes manifests, and the CI/CD pipeline.
 - [docs/use-cases/sql-elt.md](docs/use-cases/sql-elt.md) walks a real pipeline config, with [examples/daily_revenue_pipeline.json](examples/daily_revenue_pipeline.json) as the input.

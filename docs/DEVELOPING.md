@@ -62,7 +62,7 @@ make worker queues=remote     # claims, executes, reports; Ctrl-C to stop
 [WORKERS.md](WORKERS.md) is the protocol: the four endpoints, the lease contract, and what to do when you lose one.
 
 Set `CONDUIT_API_KEYS` in `.env` (`openssl rand -hex 32`) to stop the API being open, then pass the same key to the Make targets as `API_KEY=...`.
-Conduit does not speak TLS, so anything beyond a laptop needs a reverse proxy in front: [DEPLOYMENT.md](DEPLOYMENT.md).
+Anything beyond a laptop needs TLS, either from `CONDUIT_TLS_CERT_FILE` or a reverse proxy in front: [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Testing
 

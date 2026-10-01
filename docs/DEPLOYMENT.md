@@ -1,16 +1,27 @@
 # Deploying Conduit
 
-Conduit does not speak TLS, and four of its endpoints are deliberately unauthenticated.
-Both of those are the right decisions, and both of them mean the same thing: **there is a reverse proxy in a correct deployment, and it is not optional.**
+Conduit can serve TLS itself, and `/metrics` can require a token, so a small deployment can run without anything in front of it.
+**A reverse proxy is still recommended**, because it covers rate limits, body caps, and certificate renewal, none of which Conduit has code for.
+This page is the recipe for both.
 
-Serving Conduit directly on an untrusted network is unsupported.
-This page is the recipe.
+## Serving TLS directly
+
+```
+CONDUIT_TLS_CERT_FILE=/etc/conduit/cert.pem
+CONDUIT_TLS_KEY_FILE=/etc/conduit/key.pem
+CONDUIT_METRICS_TOKEN=$(openssl rand -hex 32)
+```
+
+Set both files or neither, or the server refuses to start.
+Conduit reads the cert once at boot, so renewing it means a restart.
+With a token set, `/metrics` needs `Authorization: Bearer <token>` and Prometheus needs the same token as `authorization.credentials` in its scrape config.
+`/ready` and `/health` stay open so probes keep working, so keep the port off the public internet or put a proxy in front to gate them.
 
 ## Why a proxy, specifically
 
 TLS is the obvious half.
 `CONDUIT_API_KEYS` are bearer tokens, and a bearer token over plain HTTP is a token in cleartext, readable by anything on the path.
-Building TLS into the process would mean owning certificates, ACME, renewal, SNI, and cipher policy, which Caddy and nginx already own and do better.
+Conduit's own TLS is a cert and a key and nothing else, while Caddy and nginx also own ACME, renewal, SNI, and cipher policy.
 
 The less obvious half is path gating, and it matters more than it looks.
 `APIKeyAuth` mounts on the `/api/jobs` group only, so that Kubernetes probes, `ci.yml`'s readiness poll, and the Prometheus scrape keep working without a credential.
@@ -18,11 +29,11 @@ That is correct inside a private network and dangerous the moment the port is pu
 
 | Path | Auth | Who should reach it |
 | --- | --- | --- |
-| `/api/jobs/*` | `CONDUIT_API_KEYS`, when set | Clients and workers, over TLS |
+| `/api/*` | `CONDUIT_API_KEYS` or an issued key, when either exists | Clients and workers, over TLS |
 | `/live` | None | Anyone; it touches no dependency and reveals only that the process is up |
 | `/ready` | None | Private only. It names the liveness of Postgres, and of every Redis node when `CONDUIT_LOCK=redlock`. |
 | `/health` | None | Private only. Alias of `/live`, kept for compatibility. |
-| `/metrics` | None | Private only. Queue depth, throughput, failure counts. |
+| `/metrics` | `CONDUIT_METRICS_TOKEN`, when set | Private only. Queue depth, throughput, failure counts. |
 
 So the proxy is what makes the unauthenticated endpoints private, which is what lets them stay unauthenticated.
 
@@ -284,7 +295,8 @@ Alert on the backlog and on the dead-letter step, not on a failure rate: a queue
 ## Checklist
 
 - [ ] `CONDUIT_API_KEYS` set to at least one 32-byte random key, or a key issued with `conduit keys create`. With neither the API is open, and the server warns about it at boot.
-- [ ] TLS terminated by something in front. The server warns unconditionally that keys transit in clear, because it cannot see what is upstream.
+- [ ] TLS terminated by something in front, or `CONDUIT_TLS_CERT_FILE` and `CONDUIT_TLS_KEY_FILE` set. Without a cert the server warns that keys transit in clear, because it cannot see what is upstream.
+- [ ] `CONDUIT_METRICS_TOKEN` set if `/metrics` is reachable from anywhere you do not trust.
 - [ ] `/metrics`, `/ready`, and `/health` return 404 through the proxy while still returning 200 on the private address. Test it, do not assume it.
 - [ ] `CONDUIT_HTTP_ADDRESS` on loopback, or the port unpublished.
 - [ ] `CONDUIT_TRUSTED_PROXIES` matching the proxy's network, or empty.
@@ -297,4 +309,4 @@ Alert on the backlog and on the dead-letter step, not on a failure rate: a queue
 
 ## Known gaps
 
-- **`CONDUIT_METRICS_LISTEN_ADDRESS` is parsed and ignored.** `/metrics` is served on the main HTTP port, which is why the proxy has to gate it. A separate metrics listener would be the better answer.
+- **`CONDUIT_METRICS_LISTEN_ADDRESS` is parsed and ignored.** `/metrics` is served on the main HTTP port, which is why it needs a token or a proxy in front. A separate metrics listener would be the better answer.

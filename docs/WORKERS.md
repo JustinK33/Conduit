@@ -179,8 +179,8 @@ That is fine on a laptop and wrong everywhere else.
 
 Two things to know before you point a worker at anything but localhost:
 
-- A bearer token over plain HTTP is a token in cleartext, and Conduit does not speak TLS.
-  Put a reverse proxy in front of it. See [DEPLOYMENT.md](DEPLOYMENT.md).
+- A bearer token over plain HTTP is a token in cleartext.
+  Set `CONDUIT_TLS_CERT_FILE` or put a reverse proxy in front of it. See [DEPLOYMENT.md](DEPLOYMENT.md).
 - A key acts for one tenant, and a worker only claims that tenant's jobs.
   See [DEPLOYMENT.md](DEPLOYMENT.md#generating-and-rotating-keys) for issuing one.
 
