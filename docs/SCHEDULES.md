@@ -36,7 +36,7 @@ curl -X POST http://localhost:8080/api/schedules \
 ```
 
 `task` is the same object `POST /api/jobs` takes, so anything you can enqueue once you can enqueue on a schedule.
-The `name` is unique, which is what makes a retried create idempotent: two POSTs cannot leave you with two schedules firing the same task.
+The `name` is unique within a tenant, which is what makes a retried create idempotent: two POSTs cannot leave you with two schedules firing the same task.
 
 `GET /api/schedules` lists them with `next_run_at`, `last_run_at`, and `last_job_id`, which is how you check a schedule is alive without opening `psql`.
 `DELETE /api/schedules/:id` removes one; jobs it already enqueued are untouched and finish or fail on their own terms.
@@ -116,7 +116,7 @@ All of them try to fire it.
 Exactly one job comes out, and this is how:
 
 1. Each instance enqueues with `idempotency_key = "sched:<schedule id>:<fire unix>"`. The key is derived from the fire instant, not the wall clock, so all ten replicas compute the same string.
-2. `jobs_idempotency_key_idx` makes the second insert impossible, and `Enqueue` answers a duplicate key by returning the existing job's id instead of an error. Nine replicas get the winner's job id back and do nothing else.
+2. `jobs_tenant_idempotency_key_idx` makes the second insert impossible, and `Enqueue` answers a duplicate key by returning the existing job's id instead of an error. Nine replicas get the winner's job id back and do nothing else.
 3. The advance is `UPDATE schedules SET next_run_at = $next WHERE id = $1 AND next_run_at = $observed`, so exactly one replica's `UPDATE` matches and the rest affect zero rows.
 
 That is the whole coordination story: no leader election, no advisory lock, no new failure mode.

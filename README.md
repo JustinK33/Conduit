@@ -91,7 +91,7 @@ Working on Conduit itself, scheduling recurring work, or running your own worker
 - [PROJECT.md](PROJECT.md) has the API surface with curl examples and response shapes, plus the config table.
 - [docs/FEATURES.md](docs/FEATURES.md) goes deep on four pieces: the async publish and its tradeoff, Redlock, the Kubernetes manifests, and the CI/CD pipeline.
 - [docs/use-cases/sql-elt.md](docs/use-cases/sql-elt.md) walks a real pipeline config, with [examples/daily_revenue_pipeline.json](examples/daily_revenue_pipeline.json) as the input.
-- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API, phase 3 is the Postgres-only default, phase 4 is the defaults and the per-task breaker, phase 6 is the pinned image in the quick start, phase 7 is the wire contract; next is multi-tenancy and operability.
+- [docs/ROADMAP.md](docs/ROADMAP.md) is the ordered list of what stands between this and someone else being able to use it. Phase 1 is the pull API, phase 2 is multi-tenancy, phase 3 is the Postgres-only default, phase 4 is the defaults and the per-task breaker, phase 6 is the pinned image in the quick start, phase 7 is the wire contract; next is operability.
 - [migrations/](migrations/) is the schema, applied by `conduit migrate` (`make migrate`, and automatically on every `make up`).
 
 ## License

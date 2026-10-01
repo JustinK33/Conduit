@@ -181,8 +181,8 @@ Two things to know before you point a worker at anything but localhost:
 
 - A bearer token over plain HTTP is a token in cleartext, and Conduit does not speak TLS.
   Put a reverse proxy in front of it. See [DEPLOYMENT.md](DEPLOYMENT.md).
-- The key is all-or-nothing. Holding it means claiming, cancelling, and reading every job in the instance.
-  Per-key identity and tenant scoping are [phase 2](ROADMAP.md#phase-2---more-than-one-tenant).
+- A key acts for one tenant, and a worker only claims that tenant's jobs.
+  See [DEPLOYMENT.md](DEPLOYMENT.md#generating-and-rotating-keys) for issuing one.
 
 ## Wire format, for a client that is not Go
 

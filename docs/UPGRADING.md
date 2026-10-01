@@ -1,5 +1,22 @@
 # Upgrading
 
+## v0.4.0 to v0.5.0
+
+**1. Run the migrations before starting the new image.**
+
+`migrations/006_tenants.sql` adds `tenant_id` to `jobs` and `schedules`, swaps three indexes for tenant-leading ones, and creates `api_keys`.
+Existing rows land in the `default` tenant.
+The server checks `api_keys` at boot, so an unmigrated database stops it from starting.
+
+**2. Idempotency keys and schedule names are now unique per tenant.**
+
+Nothing changes for a deployment that only uses `CONDUIT_API_KEYS`, because all of those keys act for `default`.
+
+**3. Issuing a key turns auth on.**
+
+An instance with `CONDUIT_API_KEYS` unset stays open until the first `conduit keys create`.
+After that every `/api` request needs a key.
+
 ## v0.3.1 to v0.4.0
 
 No wire change and no breaking change to any existing request or response.

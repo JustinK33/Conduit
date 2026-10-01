@@ -162,7 +162,8 @@ This turns the queue into a small data workflow runtime for operational analytic
 
 ### `internal/api`
 Nine Gin job endpoints, registered in `RegisterRoutes`. The whole group sits behind
-`APIKeyAuth(h.APIKeys)`, which is a pass-through when `CONDUIT_API_KEYS` is unset.
+`APIKeyAuth(h.APIKeys, h.Keys)`, which resolves the key to a tenant and is a
+pass-through when `CONDUIT_API_KEYS` is unset and no key has been issued.
 
 | Method | Path | Notes |
 |--------|------|-------|
@@ -285,7 +286,7 @@ Every instance runs the tick and they all see the same due rows, so all of them
 try to fire. The dedup is two mechanisms already in the tree rather than a new
 one: the idempotency key is derived from the fire instant
 (`sched:<id>:<fire unix>`), so every replica computes the same string and
-`jobs_idempotency_key_idx` collapses them to one job; and the advance is
+`jobs_tenant_idempotency_key_idx` collapses them to one job; and the advance is
 conditional on the `next_run_at` the caller read, so exactly one `UPDATE`
 matches. No leader election and no advisory lock. See [SCHEDULES.md](SCHEDULES.md).
 

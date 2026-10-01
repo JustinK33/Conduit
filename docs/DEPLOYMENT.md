@@ -168,6 +168,19 @@ Each key must be at least 16 characters or the server refuses to start.
 
 Keys go in `.env` or a Secret. Never in a config file that is committed, and never in a ConfigMap.
 
+Keys in `CONDUIT_API_KEYS` act for the `default` tenant.
+For anyone else, issue a key that acts for their tenant:
+
+```
+conduit keys create acme ci
+conduit keys list
+conduit keys revoke <id>
+```
+
+The key is printed once and only its hash is stored.
+Each tenant sees only its own jobs and schedules, and only `default` can run `sql.etl`.
+Issuing the first key turns auth on even with `CONDUIT_API_KEYS` unset.
+
 ## The image
 
 `ghcr.io/justink33/conduit`, published for `linux/amd64` and `linux/arm64`, and only after the unit tests, the race detector, and the k6 load test have all passed on that commit.
@@ -224,7 +237,7 @@ Two things worth knowing before the first seven days elapse:
 - **`completed_at` is the clock, not `created_at`.** A job that sat `PENDING` for a month and completed yesterday is a day old by this measure, which is the behaviour you want: nothing deletes work that has not finished.
 
 The claim path is unaffected either way, because `migrations/001` indexes `PENDING` and `RUNNING` through partial indexes.
-What retention protects is `jobs_created_idx`, `jobs_state_created_idx`, and the disk.
+What retention protects is `jobs_tenant_created_idx`, `jobs_tenant_state_created_idx`, and the disk.
 
 ## Requeueing a dead job
 
@@ -270,7 +283,7 @@ Alert on the backlog and on the dead-letter step, not on a failure rate: a queue
 
 ## Checklist
 
-- [ ] `CONDUIT_API_KEYS` set to at least one 32-byte random key. Absent means the API is open, and the server warns about it at boot.
+- [ ] `CONDUIT_API_KEYS` set to at least one 32-byte random key, or a key issued with `conduit keys create`. With neither the API is open, and the server warns about it at boot.
 - [ ] TLS terminated by something in front. The server warns unconditionally that keys transit in clear, because it cannot see what is upstream.
 - [ ] `/metrics`, `/ready`, and `/health` return 404 through the proxy while still returning 200 on the private address. Test it, do not assume it.
 - [ ] `CONDUIT_HTTP_ADDRESS` on loopback, or the port unpublished.
@@ -285,4 +298,3 @@ Alert on the backlog and on the dead-letter step, not on a failure rate: a queue
 ## Known gaps
 
 - **`CONDUIT_METRICS_LISTEN_ADDRESS` is parsed and ignored.** `/metrics` is served on the main HTTP port, which is why the proxy has to gate it. A separate metrics listener would be the better answer.
-- **The API key is all-or-nothing.** Holding it means claiming, cancelling, and reading every job. Per-key identity is [phase 2](ROADMAP.md#phase-2---more-than-one-tenant).

@@ -41,7 +41,15 @@ That also fixes a real bug: today's retry is two sequential updates, `RUNNING ->
 **Done when** a worker written in a language that is not Go, running in a process that is not the server, claims a job, heartbeats it, completes it, and the job reaches `COMPLETED`.
 And when a claim without a key returns 401, a complete with a stale token returns 409, and `GET /api/jobs/:id` no longer leaks the lease token to whoever asks.
 
-## Phase 2 - More than one tenant
+## Phase 2 - More than one tenant (done)
+
+Shipped. Every job and schedule has a `tenant_id`, and `conduit keys create <tenant>` issues a key that acts for one tenant.
+Keys are stored as SHA-256 hashes in `api_keys`, so the key itself is only shown once.
+Keys in `CONDUIT_API_KEYS` keep working and act for the `default` tenant, which is also where every pre-existing row lands.
+`TestTenantIsolation` creates jobs for two tenants with the same idempotency key and checks that neither can get, list, cancel, requeue, or claim the other's.
+`sql.etl` runs against the operator's own databases, so only the `default` tenant can enqueue or schedule it.
+
+The original write-up follows.
 
 Phase 1's API key is all-or-nothing: holding it means you can claim, cancel, and read every job in the instance.
 Two people cannot share a deployment.
