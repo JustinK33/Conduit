@@ -46,6 +46,8 @@ const AnyTenant = ""
 type ClaimFilter struct {
 	Tenant string
 	Queues []string
+	// Names limits the claim to these task names. Empty means any.
+	Names []string
 }
 
 // ListFilter narrows a ListJobs call. State is optional - empty string means
@@ -267,9 +269,12 @@ func (s *PostgresStore) ClaimNextJob(ctx context.Context, leaseDuration time.Dur
 		return models.Job{}, fmt.Errorf("store: generate lease token: %w", err)
 	}
 
-	var queueParam any
+	var queueParam, nameParam any
 	if len(filter.Queues) > 0 {
 		queueParam = filter.Queues
+	}
+	if len(filter.Names) > 0 {
+		nameParam = filter.Names
 	}
 
 	query := fmt.Sprintf(`
@@ -280,6 +285,7 @@ func (s *PostgresStore) ClaimNextJob(ctx context.Context, leaseDuration time.Dur
 			  AND (scheduled_at IS NULL OR scheduled_at <= NOW())
 			  AND ($5::text[] IS NULL OR task_queue = ANY($5))
 			  AND ($6 = '' OR tenant_id = $6)
+			  AND ($7::text[] IS NULL OR task_name = ANY($7))
 			ORDER BY task_priority DESC, scheduled_at ASC NULLS LAST
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
@@ -301,7 +307,7 @@ func (s *PostgresStore) ClaimNextJob(ctx context.Context, leaseDuration time.Dur
 			jobs.scheduled_at, jobs.started_at, jobs.lease_expires_at, jobs.lease_token, jobs.completed_at,
 			jobs.created_at, jobs.updated_at, jobs.metadata, jobs.tenant_id, jobs.task_priority`, s.TableName, s.TableName)
 
-	job, err := scanJob(ctx, s.Pool.QueryRow(ctx, query, now, leaseExpiresAt, leaseToken, now, queueParam, filter.Tenant))
+	job, err := scanJob(ctx, s.Pool.QueryRow(ctx, query, now, leaseExpiresAt, leaseToken, now, queueParam, filter.Tenant, nameParam))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return models.Job{}, ErrJobNotFound

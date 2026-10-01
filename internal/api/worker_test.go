@@ -22,6 +22,7 @@ type workerQueue struct {
 	claimErr    error
 	claimQueues []string
 	claimTenant string
+	claimNames  []string
 	claimLease  time.Duration
 
 	heartbeatExpires time.Time
@@ -43,6 +44,7 @@ func (w *workerQueue) Cancel(context.Context, string, string) error        { ret
 func (w *workerQueue) Claim(_ context.Context, filter store.ClaimFilter, lease time.Duration) (models.Job, error) {
 	w.claimQueues = filter.Queues
 	w.claimTenant = filter.Tenant
+	w.claimNames = filter.Names
 	w.claimLease = lease
 	return w.claimJob, w.claimErr
 }
@@ -98,7 +100,7 @@ func TestClaimJob(t *testing.T) {
 	t.Run("returns the job, its token, and its expiry", func(t *testing.T) {
 		q := &workerQueue{claimJob: job}
 		rec := do(newWorkerRouter(q, nil), http.MethodPost, "/api/jobs/claim",
-			`{"queues":["remote"],"lease_seconds":30}`, "")
+			`{"queues":["remote"],"names":["remote.render"],"lease_seconds":30}`, "")
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -118,6 +120,9 @@ func TestClaimJob(t *testing.T) {
 		}
 		if len(q.claimQueues) != 1 || q.claimQueues[0] != "remote" {
 			t.Errorf("queues = %v, want [remote]", q.claimQueues)
+		}
+		if len(q.claimNames) != 1 || q.claimNames[0] != "remote.render" {
+			t.Errorf("names = %v, want [remote.render]", q.claimNames)
 		}
 		if q.claimLease != 30*time.Second {
 			t.Errorf("lease = %v, want 30s", q.claimLease)

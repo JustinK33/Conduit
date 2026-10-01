@@ -434,3 +434,29 @@ func TestClaimTakesHigherPriorityFirst(t *testing.T) {
 		}
 	}
 }
+
+func TestClaimByTaskName(t *testing.T) {
+	ctx, pool := testPool(t)
+	s := NewPostgresStore(pool, claimTestTable(ctx, t, pool))
+	now := time.Now().UTC()
+
+	for _, name := range []string{"resize", "transcode"} {
+		if err := s.CreateJob(ctx, models.Job{
+			ID:          name,
+			Task:        models.Task{ID: name, Name: name, Queue: "media"},
+			State:       models.JobStatePending,
+			ScheduledAt: &now,
+			CreatedAt:   now,
+		}); err != nil {
+			t.Fatalf("CreateJob(%s): %v", name, err)
+		}
+	}
+
+	got, err := s.ClaimNextJob(ctx, time.Minute, ClaimFilter{Queues: []string{"media"}, Names: []string{"transcode"}})
+	if err != nil || got.ID != "transcode" {
+		t.Fatalf("claim names=[transcode] = %q, %v, want transcode", got.ID, err)
+	}
+	if _, err := s.ClaimNextJob(ctx, time.Minute, ClaimFilter{Names: []string{"transcode"}}); err != ErrJobNotFound {
+		t.Errorf("second claim got %v, want ErrJobNotFound since resize is not a match", err)
+	}
+}

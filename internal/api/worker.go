@@ -24,6 +24,9 @@ type ClaimRequest struct {
 	// Queues to claim from. Empty means any queue, which is almost never what
 	// a remote worker wants, since it will win jobs it has no handler for.
 	Queues []string `json:"queues,omitempty"`
+	// Names limits the claim to these task names, for a worker that shares a
+	// queue but only has code for some of what lands on it.
+	Names []string `json:"names,omitempty"`
 	// LeaseSeconds is a request, not a grant. The server clamps it to its own
 	// configured maximum.
 	LeaseSeconds int `json:"lease_seconds,omitempty"`
@@ -78,7 +81,7 @@ func (h *Handler) ClaimJob(c *gin.Context) {
 		return
 	}
 
-	filter := store.ClaimFilter{Tenant: tenantOf(c), Queues: request.Queues}
+	filter := store.ClaimFilter{Tenant: tenantOf(c), Queues: request.Queues, Names: request.Names}
 	job, err := h.Queue.Claim(c.Request.Context(), filter, time.Duration(request.LeaseSeconds)*time.Second)
 	if err != nil {
 		if errors.Is(err, store.ErrJobNotFound) {
