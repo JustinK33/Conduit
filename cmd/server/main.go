@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -416,14 +417,24 @@ func run(ctx context.Context) error {
 		IdleTimeout:  cfg.HTTP.IdleTimeout,
 	}
 
+	// Bind here rather than in the goroutine, so a taken port stops the process
+	// instead of leaving it running with no HTTP server.
+	ln, err := net.Listen("tcp", cfg.HTTP.Address)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	serveErr := make(chan error, 1)
 	go func() {
 		log.Info().Str("addr", cfg.HTTP.Address).Msg("server listening")
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error().Err(err).Msg("listen error")
-		}
+		serveErr <- srv.Serve(ln)
 	}()
 
-	<-ctx.Done()
+	var runErr error
+	select {
+	case <-ctx.Done():
+	case err := <-serveErr:
+		runErr = fmt.Errorf("serve: %w", err)
+	}
 	log.Info().Msg("shutting down")
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -437,7 +448,7 @@ func run(ctx context.Context) error {
 		log.Warn().Err(err).Msg("worker pool drain timeout")
 	}
 
-	return nil
+	return runErr
 }
 
 // TaskHandler is the application-side function executed for a job.
