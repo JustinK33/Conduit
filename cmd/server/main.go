@@ -320,6 +320,7 @@ func run(ctx context.Context) error {
 	}
 	defer jobReconciler.Stop()
 
+	claimWakes := queue.NewWaker()
 	switch {
 	case kafkaClient != nil:
 		consumerLog := logger.WithComponent(log, "consumer")
@@ -338,21 +339,24 @@ func run(ctx context.Context) error {
 			}
 		}()
 
-	case cfg.Reconciler.Enabled:
-		// The Postgres transport's consume side. A notification only pokes the
-		// reconciler, which then claims through the same path it always uses, so
-		// the transport cannot double-dispatch and needs no queue filter of its
-		// own. Without this an enqueue onto an idle queue waits out
-		// CONDUIT_RECONCILER_IDLE_INTERVAL.
-		listener := queue.NewPostgresListener(cfg.Postgres.DSN, queue.NotifyChannel, logger.WithComponent(log, "notify"))
-		go listener.Run(ctx, jobReconciler.Wake)
-
 	default:
-		// Nothing consumes: no broker, and the reconciler that would have claimed
-		// the work is switched off. Correct for an API-only instance whose jobs
-		// are executed by remote workers over the pull API, and a silent black
-		// hole otherwise.
-		log.Warn().Msg("CONDUIT_RECONCILER_ENABLED=false with the postgres transport: this instance dispatches nothing to its own worker pool")
+		// The Postgres transport's consume side. A notification only pokes the
+		// reconciler and any long-polling claims, which then claim through the
+		// same path they always use, so the transport cannot double-dispatch and
+		// needs no queue filter of its own. Without this an enqueue onto an idle
+		// queue waits out CONDUIT_RECONCILER_IDLE_INTERVAL.
+		listener := queue.NewPostgresListener(cfg.Postgres.DSN, queue.NotifyChannel, logger.WithComponent(log, "notify"))
+		go listener.Run(ctx, func() {
+			jobReconciler.Wake()
+			claimWakes.Wake()
+		})
+
+		if !cfg.Reconciler.Enabled {
+			// Nothing consumes in-process. Correct for an API-only instance whose
+			// jobs are executed by remote workers over the pull API, and a silent
+			// black hole otherwise.
+			log.Warn().Msg("CONDUIT_RECONCILER_ENABLED=false with the postgres transport: this instance dispatches nothing to its own worker pool")
+		}
 	}
 
 	sched := scheduler.New(scheduler.Config{
@@ -397,6 +401,9 @@ func run(ctx context.Context) error {
 
 	handler := api.NewHandler(jobSvc, jobStore, logger.WithComponent(log, "api"), reg, cfg.HTTP.APIKeys)
 	handler.Keys = keyStore
+	handler.Wakes = claimWakes
+	// Under the write timeout, or the server cuts off its own long-poll.
+	handler.MaxClaimWait = min(25*time.Second, cfg.HTTP.WriteTimeout-2*time.Second)
 	handler.RegisterRoutes(router)
 	// Its own handler with its own routes, mounted on the same router so it
 	// inherits the middleware stack and the same API key auth.

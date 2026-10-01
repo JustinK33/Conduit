@@ -34,6 +34,15 @@ type Handler struct {
 	// APIKeys and Keys guard the /api/jobs group. See APIKeyAuth.
 	APIKeys []string
 	Keys    KeyLookup
+	// Wakes and MaxClaimWait back the long-poll claim. A nil Wakes still
+	// long-polls, on the fallback tick alone.
+	Wakes        Wakes
+	MaxClaimWait time.Duration
+}
+
+// Wakes is *queue.Waker.
+type Wakes interface {
+	C() <-chan struct{}
 }
 
 type EnqueueRequest struct {

@@ -514,3 +514,75 @@ func TestTokenAuth(t *testing.T) {
 		}
 	}
 }
+
+// pollQueue has no job until ready is closed.
+type pollQueue struct {
+	workerQueue
+	ready chan struct{}
+}
+
+func (p *pollQueue) Claim(context.Context, store.ClaimFilter, time.Duration) (models.Job, error) {
+	select {
+	case <-p.ready:
+		return models.Job{ID: "job-1"}, nil
+	default:
+		return models.Job{}, store.ErrJobNotFound
+	}
+}
+
+type chanWakes chan struct{}
+
+func (w chanWakes) C() <-chan struct{} { return w }
+
+func TestClaimLongPoll(t *testing.T) {
+	newHandler := func(q Queue, wakes Wakes) *gin.Engine {
+		h := NewHandler(q, mockStore{}, zerolog.Nop(), testRegistry(), nil)
+		h.Wakes = wakes
+		h.MaxClaimWait = 10 * time.Second
+		router := gin.New()
+		h.RegisterRoutes(router)
+		return router
+	}
+
+	t.Run("a wake returns the job without waiting out the fallback tick", func(t *testing.T) {
+		q := &pollQueue{ready: make(chan struct{})}
+		wakes := make(chanWakes)
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			close(q.ready)
+			close(wakes)
+		}()
+
+		start := time.Now()
+		rec := do(newHandler(q, wakes), http.MethodPost, "/api/jobs/claim", `{"wait_seconds":5}`, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Errorf("took %s, want well under the %s fallback", took, claimRetryEvery)
+		}
+	})
+
+	t.Run("an empty queue answers 204 once the wait runs out", func(t *testing.T) {
+		router := newHandler(&pollQueue{ready: make(chan struct{})}, nil)
+		start := time.Now()
+		rec := do(router, http.MethodPost, "/api/jobs/claim", `{"wait_seconds":1}`, "")
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", rec.Code)
+		}
+		if took := time.Since(start); took < time.Second {
+			t.Errorf("returned after %s, before the 1s wait", took)
+		}
+	})
+
+	t.Run("no wait_seconds is a single claim", func(t *testing.T) {
+		router := newHandler(&pollQueue{ready: make(chan struct{})}, nil)
+		start := time.Now()
+		if rec := do(router, http.MethodPost, "/api/jobs/claim", `{}`, ""); rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", rec.Code)
+		}
+		if took := time.Since(start); took > 100*time.Millisecond {
+			t.Errorf("took %s, a claim without a wait should not block", took)
+		}
+	})
+}

@@ -30,7 +30,14 @@ type ClaimRequest struct {
 	// LeaseSeconds is a request, not a grant. The server clamps it to its own
 	// configured maximum.
 	LeaseSeconds int `json:"lease_seconds,omitempty"`
+	// WaitSeconds holds the request open until a job arrives or the wait runs
+	// out. The server clamps it to its own maximum.
+	WaitSeconds int `json:"wait_seconds,omitempty"`
 }
+
+// claimRetryEvery bounds how stale a long-poll can be when a notification is
+// missed, or when a job becomes due on its scheduled_at with nobody notifying.
+const claimRetryEvery = 2 * time.Second
 
 type ClaimResponse struct {
 	Job            models.Job `json:"job"`
@@ -76,21 +83,44 @@ func (h *Handler) ClaimJob(c *gin.Context) {
 			return
 		}
 	}
-	if request.LeaseSeconds < 0 {
-		RespondError(c, http.StatusBadRequest, "invalid_request", "lease_seconds must not be negative")
+	if request.LeaseSeconds < 0 || request.WaitSeconds < 0 {
+		RespondError(c, http.StatusBadRequest, "invalid_request", "lease_seconds and wait_seconds must not be negative")
 		return
 	}
 
+	ctx := c.Request.Context()
 	filter := store.ClaimFilter{Tenant: tenantOf(c), Queues: request.Queues, Names: request.Names}
-	job, err := h.Queue.Claim(c.Request.Context(), filter, time.Duration(request.LeaseSeconds)*time.Second)
-	if err != nil {
-		if errors.Is(err, store.ErrJobNotFound) {
+	deadline := time.Now().Add(min(time.Duration(request.WaitSeconds)*time.Second, h.MaxClaimWait))
+	var job models.Job
+	for {
+		var wake <-chan struct{}
+		if h.Wakes != nil {
+			wake = h.Wakes.C()
+		}
+		var err error
+		job, err = h.Queue.Claim(ctx, filter, time.Duration(request.LeaseSeconds)*time.Second)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, store.ErrJobNotFound) {
+			log.Error().Err(err).Msg("claim failed")
+			RespondError(c, http.StatusInternalServerError, "internal_error", "failed to claim a job")
+			return
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
 			c.Status(http.StatusNoContent)
 			return
 		}
-		log.Error().Err(err).Msg("claim failed")
-		RespondError(c, http.StatusInternalServerError, "internal_error", "failed to claim a job")
-		return
+		// ponytail: every waiter retries on every notification, whichever queue
+		// or tenant it was for. Fine for tens of waiters, route wakes by queue
+		// if it is ever thousands.
+		select {
+		case <-wake:
+		case <-time.After(min(left, claimRetryEvery)):
+		case <-ctx.Done():
+			return
+		}
 	}
 
 	// Same counter the in-process worker increments, so remote execution shows
