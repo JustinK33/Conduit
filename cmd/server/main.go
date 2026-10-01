@@ -382,15 +382,19 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("trusted proxies: %w", err)
 	}
 
-	if len(cfg.HTTP.APIKeys) == 0 {
-		log.Warn().Msg("CONDUIT_API_KEYS is empty: /api/jobs is unauthenticated, so anyone who can reach this port can enqueue, claim, and cancel work")
+	keyStore := store.NewKeyStore(pgPool)
+	issued, err := keyStore.HasActiveKeys(ctx)
+	if err != nil {
+		return fmt.Errorf("check api keys: %w", err)
+	}
+	if len(cfg.HTTP.APIKeys) == 0 && !issued {
+		log.Warn().Msg("no API keys: /api is unauthenticated until CONDUIT_API_KEYS is set or a key is issued with conduit keys create")
 	} else {
 		// The process cannot see what is in front of it, so this is
 		// unconditional rather than clever.
 		log.Warn().Msg("API keys are bearer tokens and this server speaks plain HTTP: terminate TLS in front of it or the keys transit in clear (see docs/DEPLOYMENT.md)")
 	}
 
-	keyStore := store.NewKeyStore(pgPool)
 	handler := api.NewHandler(jobSvc, jobStore, logger.WithComponent(log, "api"), reg, cfg.HTTP.APIKeys)
 	handler.Keys = keyStore
 	handler.RegisterRoutes(router)
