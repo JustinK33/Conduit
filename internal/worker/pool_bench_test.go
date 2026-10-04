@@ -56,7 +56,9 @@ func BenchmarkPoolThroughput(b *testing.B) {
 
 	b.StopTimer()
 	cancel()
-	pool.Stop(context.Background())
+	if err := pool.Stop(context.Background()); err != nil {
+		b.Fatalf("stop pool: %v", err)
+	}
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "jobs/sec")
 }
 
@@ -86,7 +88,9 @@ func BenchmarkPoolScaling(b *testing.B) {
 
 			b.StopTimer()
 			cancel()
-			pool.Stop(context.Background())
+			if err := pool.Stop(context.Background()); err != nil {
+				b.Fatalf("stop pool: %v", err)
+			}
 			b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "jobs/sec")
 		})
 	}
@@ -105,7 +109,9 @@ func BenchmarkPoolLatency(b *testing.B) {
 	pool.Start(ctx)
 	defer func() {
 		cancel()
-		pool.Stop(context.Background())
+		if err := pool.Stop(context.Background()); err != nil {
+			b.Errorf("stop pool: %v", err)
+		}
 	}()
 
 	job := models.Job{ID: "bench"}
@@ -133,7 +139,9 @@ func BenchmarkPoolSubmitContention(b *testing.B) {
 	pool.Start(ctx)
 	defer func() {
 		cancel()
-		pool.Stop(context.Background())
+		if err := pool.Stop(context.Background()); err != nil {
+			b.Errorf("stop pool: %v", err)
+		}
 	}()
 
 	job := models.Job{ID: "bench"}

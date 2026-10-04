@@ -152,13 +152,13 @@ func runKeys(ctx context.Context, args []string) error {
 			return err
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tTENANT\tNAME\tCREATED\tREVOKED")
+		_, _ = fmt.Fprintln(w, "ID\tTENANT\tNAME\tCREATED\tREVOKED")
 		for _, k := range list {
 			revoked := "-"
 			if k.RevokedAt != nil {
 				revoked = k.RevokedAt.UTC().Format(time.RFC3339)
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", k.ID, k.TenantID, k.Name, k.CreatedAt.UTC().Format(time.RFC3339), revoked)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", k.ID, k.TenantID, k.Name, k.CreatedAt.UTC().Format(time.RFC3339), revoked)
 		}
 		return w.Flush()
 	case args[0] == "revoke" && len(args) == 2:
@@ -208,7 +208,7 @@ func run(ctx context.Context) error {
 		}
 		defer func() {
 			for _, c := range redisClients {
-				c.Close()
+				_ = c.Close()
 			}
 		}()
 		lockMgr = lock.NewManager(redisClients, lock.Config{
@@ -244,7 +244,7 @@ func run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("kafka: %w", err)
 		}
-		defer kafkaClient.Close()
+		defer func() { _ = kafkaClient.Close() }()
 		publisher = kafkaClient
 		dispatchTarget = cfg.Kafka.Topic
 	} else {

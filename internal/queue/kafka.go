@@ -59,7 +59,7 @@ func NewKafkaClient(cfg models.KafkaConfig) (*KafkaClient, error) {
 
 	cg, err := sarama.NewConsumerGroup(cfg.Brokers, cfg.ConsumerGroup, sc)
 	if err != nil {
-		producer.Close()
+		_ = producer.Close()
 		return nil, fmt.Errorf("queue: create consumer group: %w", err)
 	}
 

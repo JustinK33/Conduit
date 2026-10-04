@@ -315,7 +315,8 @@ func TestCompleteClaimedJob(t *testing.T) {
 				}
 			}
 
-			if tc.wantErr == nil {
+			switch tc.wantErr {
+			case nil:
 				got, err := s.GetJob(ctx, AnyTenant, id)
 				if err != nil {
 					t.Fatalf("GetJob: %v", err)
@@ -342,7 +343,7 @@ func TestCompleteClaimedJob(t *testing.T) {
 				if tc.meta != nil && got.Metadata["result"] != "success" {
 					t.Errorf("new metadata not merged: %v", got.Metadata)
 				}
-			} else if tc.wantErr == ErrLeaseLost {
+			case ErrLeaseLost:
 				// Verify row unchanged
 				got, err := s.GetJob(ctx, AnyTenant, id)
 				if err != nil {

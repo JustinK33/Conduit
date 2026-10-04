@@ -1,6 +1,7 @@
 package etl
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -178,7 +179,7 @@ func TestBuildInsertSQLRejectsWriteStatements(t *testing.T) {
 
 func TestHandlerMarksBadPayloadPermanent(t *testing.T) {
 	executor := NewExecutor(nil)
-	err := executor.Handler(nil, models.Job{
+	err := executor.Handler(context.Background(), models.Job{
 		Task: models.Task{
 			Name:    TaskName(),
 			Payload: []byte(`{"extract_sql":"SELECT id FROM orders; DROP TABLE users","target_table":"analytics.orders","target_columns":["id"]}`),

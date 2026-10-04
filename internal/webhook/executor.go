@@ -122,7 +122,7 @@ func (e *Executor) Handler(ctx context.Context, job models.Job) error {
 	if err != nil {
 		return fmt.Errorf("webhook: request failed: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
 		_, _ = io.Copy(io.Discard, response.Body)

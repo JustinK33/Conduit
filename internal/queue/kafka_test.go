@@ -1,16 +1,10 @@
 package queue
 
 import (
-	"context"
 	"testing"
 
-	"github.com/IBM/sarama"
 	"github.com/JustinK33/Conduit/pkg/models"
 )
-
-type mockMessageHandler struct{}
-
-func (mockMessageHandler) Handle(context.Context, *sarama.ConsumerMessage) error { return nil }
 
 func TestNewKafkaClient(t *testing.T) {
 	t.Skip("requires a running Kafka broker: start the stack with `make docker-up`")

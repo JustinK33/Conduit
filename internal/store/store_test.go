@@ -1,42 +1,12 @@
 package store
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/JustinK33/Conduit/pkg/models"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-type mockJobStore struct{}
-
-func (mockJobStore) CreateJob(context.Context, models.Job) error { return nil }
-func (mockJobStore) UpdateJob(context.Context, models.Job) error { return nil }
-func (mockJobStore) GetJob(context.Context, string, string) (models.Job, error) {
-	return models.Job{}, nil
-}
-func (mockJobStore) GetJobByIdempotencyKey(context.Context, string, string) (models.Job, error) {
-	return models.Job{}, nil
-}
-func (mockJobStore) CancelJob(context.Context, string, string) error { return nil }
-func (mockJobStore) ClaimNextJob(context.Context, time.Duration, ClaimFilter) (models.Job, error) {
-	return models.Job{}, nil
-}
-func (mockJobStore) RenewLease(context.Context, models.Job, time.Duration) error { return nil }
-func (mockJobStore) RequeueExpiredRunning(context.Context, int) (int, error)     { return 0, nil }
-func (mockJobStore) ReleaseClaim(context.Context, models.Job, string, time.Duration) error {
-	return nil
-}
-func (mockJobStore) CompleteClaimedJob(context.Context, string, string, map[string]string) error {
-	return nil
-}
-func (mockJobStore) FailClaimedJob(context.Context, string, string, string, *time.Time) error {
-	return nil
-}
-func (mockJobStore) ListJobs(context.Context, ListFilter) ([]models.Job, string, error) {
-	return nil, "", nil
-}
 
 func TestNewPostgresStore(t *testing.T) {
 	t.Run("captures pool and table name", func(t *testing.T) {
