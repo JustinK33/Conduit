@@ -74,10 +74,6 @@ func TestGetJob(t *testing.T) {
 	t.Skip("requires postgres: see TestJobRoundTripWithoutIdempotencyKey for the POSTGRES_TEST_DSN setup")
 }
 
-func TestCancelJob(t *testing.T) {
-	t.Skip("requires postgres: see TestJobRoundTripWithoutIdempotencyKey for the POSTGRES_TEST_DSN setup")
-}
-
 func TestClaimNextJob(t *testing.T) {
 	t.Skip("requires postgres: see TestJobRoundTripWithoutIdempotencyKey for the POSTGRES_TEST_DSN setup")
 }

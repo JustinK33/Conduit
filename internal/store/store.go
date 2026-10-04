@@ -242,21 +242,35 @@ func (s *PostgresStore) UpdateJob(ctx context.Context, job models.Job) error {
 }
 
 // CancelJob transitions a job to DEAD if the state machine allows it.
+//
+// One fenced statement rather than a read then a write, so a worker completing
+// the job in between cannot have its COMPLETED overwritten. Clearing the lease
+// token is what makes that worker's complete or fail return ErrLeaseLost.
 func (s *PostgresStore) CancelJob(ctx context.Context, tenant, id string) error {
-	job, err := s.GetJob(ctx, tenant, id)
+	query := fmt.Sprintf(`
+		UPDATE %s
+		SET state = 'DEAD',
+			completed_at = NOW(),
+			started_at = NULL,
+			lease_expires_at = NULL,
+			lease_token = NULL,
+			updated_at = NOW()
+		WHERE id = $1
+		  AND ($2 = '' OR tenant_id = $2)
+		  AND state IN ('PENDING', 'RUNNING', 'FAILED')`, s.TableName)
+
+	tag, err := s.Pool.Exec(ctx, query, id, tenant)
 	if err != nil {
 		return err
 	}
-	if !CanTransition(job.State, models.JobStateDead) {
+	if tag.RowsAffected() == 0 {
+		// Same split as RequeueDeadJob: absent and terminal are different answers.
+		if _, err := s.GetJob(ctx, tenant, id); err != nil {
+			return err
+		}
 		return ErrInvalidTransition
 	}
-
-	query := fmt.Sprintf(
-		`UPDATE %s SET state = $1, updated_at = $2 WHERE id = $3`,
-		s.TableName,
-	)
-	_, err = s.Pool.Exec(ctx, query, string(models.JobStateDead), time.Now().UTC(), id)
-	return err
+	return nil
 }
 
 // ClaimNextJob atomically selects the next due PENDING job and marks it RUNNING,
@@ -356,13 +370,18 @@ func (s *PostgresStore) RequeueExpiredRunning(ctx context.Context, limit int) (i
 		)
 		UPDATE %s jobs
 		SET state = CASE
-				WHEN expired.task_max_retries > 0 AND expired.attempt >= expired.task_max_retries THEN 'DEAD'
+				WHEN expired.attempt >= expired.task_max_retries THEN 'DEAD'
 				ELSE 'PENDING'
 			END,
 			last_error = 'job lease expired before completion',
 			scheduled_at = CASE
-				WHEN expired.task_max_retries > 0 AND expired.attempt >= expired.task_max_retries THEN scheduled_at
+				WHEN expired.attempt >= expired.task_max_retries THEN scheduled_at
 				ELSE NOW()
+			END,
+			-- Retention prunes DEAD by completed_at, so a reaped job needs one.
+			completed_at = CASE
+				WHEN expired.attempt >= expired.task_max_retries THEN NOW()
+				ELSE completed_at
 			END,
 			started_at = NULL,
 			lease_expires_at = NULL,

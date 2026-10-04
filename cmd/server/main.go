@@ -273,7 +273,7 @@ func run(ctx context.Context) error {
 		BaseDelay:   time.Second,
 		MaxDelay:    30 * time.Second,
 		Multiplier:  2,
-		MaxAttempts: 5,
+		MaxAttempts: retry.DefaultMaxAttempts,
 		Jitter:      0.1,
 	})
 

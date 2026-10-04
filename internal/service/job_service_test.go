@@ -548,3 +548,38 @@ func TestEnqueueNormalisesTheQueue(t *testing.T) {
 		})
 	}
 }
+
+func TestEnqueueDefaultsTheRetryBudget(t *testing.T) {
+	tests := []struct {
+		name       string
+		maxRetries int
+		unlimited  bool // engine MaxAttempts 0 instead of newTestService's 3
+		want       int
+	}{
+		// The lease reaper reads only the stored budget, so 0 has to become the
+		// engine's MaxAttempts (3 in newTestService) or a crash loop never ends.
+		{name: "unset becomes the engine budget", maxRetries: 0, want: 3},
+		{name: "negative becomes the engine budget", maxRetries: -1, want: 3},
+		{name: "an explicit budget is left alone", maxRetries: 7, want: 7},
+		{name: "an unlimited engine still stores a budget", maxRetries: 0, unlimited: true, want: retry.DefaultMaxAttempts},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := &mockStore{}
+			svc := newTestService(ms, &mockPublisher{})
+			if tc.unlimited {
+				svc.retry.Config.MaxAttempts = 0
+			}
+
+			if _, err := svc.Enqueue(context.Background(), models.Job{
+				Task: models.Task{Name: "send-email", MaxRetries: tc.maxRetries},
+			}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ms.createdJob.Task.MaxRetries != tc.want {
+				t.Errorf("stored max_retries = %d, want %d", ms.createdJob.Task.MaxRetries, tc.want)
+			}
+		})
+	}
+}

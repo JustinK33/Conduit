@@ -65,6 +65,15 @@ func (s *JobService) Enqueue(ctx context.Context, job models.Job) (string, error
 		// writes the field, so an unset queue would otherwise land as ''.
 		job.Task.Queue = models.DefaultQueue
 	}
+	if job.Task.MaxRetries <= 0 {
+		// The lease reaper only sees the stored budget, so without this a job
+		// whose worker keeps dying would be requeued forever. An engine with no
+		// limit still gets one here, since a stored 0 is dead on first expiry.
+		job.Task.MaxRetries = s.retry.Config.MaxAttempts
+		if job.Task.MaxRetries <= 0 {
+			job.Task.MaxRetries = retry.DefaultMaxAttempts
+		}
+	}
 	now := time.Now().UTC()
 	if job.ScheduledAt == nil {
 		job.ScheduledAt = &now

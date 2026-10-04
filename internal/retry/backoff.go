@@ -9,6 +9,10 @@ import (
 // ErrNoRetry short-circuits the retry loop for permanent failures (bad input, missing record, etc).
 var ErrNoRetry = errors.New("retry: permanent failure, no retry")
 
+// DefaultMaxAttempts is the retry budget a job gets when it doesn't set its own.
+// Migration 008 backfills old rows with the same number.
+const DefaultMaxAttempts = 5
+
 type Config struct {
 	BaseDelay   time.Duration
 	MaxDelay    time.Duration

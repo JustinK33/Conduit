@@ -658,3 +658,194 @@ func TestTenantIsolation(t *testing.T) {
 		t.Errorf("ClaimNextJob(any) = %q/%q, %v, want acme-job/acme", claimed.ID, claimed.TenantID, err)
 	}
 }
+
+// A job whose worker keeps dying never reaches FailClaimedJob, so the lease
+// reaper is the only thing that can spend its budget. It used to skip jobs with
+// task_max_retries = 0 and requeue them forever, and the DEAD it did write had
+// no completed_at, so retention never pruned it either.
+func TestRequeueExpiredRunningDeadLetters(t *testing.T) {
+	dsn := os.Getenv("POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set POSTGRES_TEST_DSN to run")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	// The reaper sweeps the whole table, so its own table keeps a live stack's
+	// expired jobs out of the row count.
+	table := claimTestTable(ctx, t, pool)
+	s := NewPostgresStore(pool, table)
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name      string
+		attempt   int
+		maxRetry  int
+		wantState models.JobState
+	}{
+		{name: "budget left requeues", attempt: 1, maxRetry: 3, wantState: models.JobStatePending},
+		{name: "budget spent dead-letters", attempt: 3, maxRetry: 3, wantState: models.JobStateDead},
+		{name: "zero budget dead-letters", attempt: 7, maxRetry: 0, wantState: models.JobStateDead},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			id := fmt.Sprintf("test-reap-%d-%s", i, now.Format("20060102150405.000000000"))
+			if err := s.CreateJob(ctx, models.Job{
+				ID:          id,
+				Task:        models.Task{ID: id, Name: "crashy", Queue: "default", MaxRetries: tc.maxRetry},
+				State:       models.JobStatePending,
+				ScheduledAt: &now,
+				CreatedAt:   now,
+			}); err != nil {
+				t.Fatalf("CreateJob: %v", err)
+			}
+			// A claim whose lease has already run out, as a dead worker leaves it.
+			if _, err := pool.Exec(ctx, fmt.Sprintf(`
+				UPDATE %s
+				SET state = 'RUNNING', attempt = $1, lease_token = 'dead-worker',
+					started_at = NOW() - INTERVAL '2 minutes',
+					lease_expires_at = NOW() - INTERVAL '1 minute'
+				WHERE id = $2`, table), tc.attempt, id); err != nil {
+				t.Fatalf("setup claim: %v", err)
+			}
+
+			n, err := s.RequeueExpiredRunning(ctx, 10)
+			if err != nil {
+				t.Fatalf("RequeueExpiredRunning: %v", err)
+			}
+			if n != 1 {
+				t.Fatalf("RequeueExpiredRunning = %d rows, want 1", n)
+			}
+
+			got, err := s.GetJob(ctx, AnyTenant, id)
+			if err != nil {
+				t.Fatalf("GetJob: %v", err)
+			}
+			if got.State != tc.wantState {
+				t.Errorf("state = %s, want %s", got.State, tc.wantState)
+			}
+			if got.LeaseToken != "" || got.LeaseExpiresAt != nil || got.StartedAt != nil {
+				t.Errorf("lease fields not cleared: token %q, expires %v, started %v", got.LeaseToken, got.LeaseExpiresAt, got.StartedAt)
+			}
+			if tc.wantState == models.JobStateDead && got.CompletedAt == nil {
+				t.Error("completed_at is nil on a reaped DEAD job, so retention never prunes it")
+			}
+			if tc.wantState == models.JobStatePending && got.CompletedAt != nil {
+				t.Errorf("completed_at = %v on a requeued job, want nil", got.CompletedAt)
+			}
+		})
+	}
+}
+
+// CancelJob used to read the state, then write DEAD without a state guard, so a
+// worker completing the job between the two had its COMPLETED overwritten while
+// both callers were told they succeeded.
+func TestCancelJob(t *testing.T) {
+	dsn := os.Getenv("POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set POSTGRES_TEST_DSN to run")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	s := NewPostgresStore(pool, "jobs")
+	now := time.Now().UTC()
+
+	create := func(t *testing.T, state models.JobState, token string) string {
+		t.Helper()
+		id := "test-cancel-" + time.Now().UTC().Format("20060102150405.000000000")
+		if err := s.CreateJob(ctx, models.Job{
+			ID:          id,
+			Task:        models.Task{ID: id, Name: "send-email", Queue: "default"},
+			State:       models.JobStatePending,
+			ScheduledAt: &now,
+			CreatedAt:   now,
+		}); err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), "DELETE FROM jobs WHERE id = $1", id)
+		})
+		if _, err := pool.Exec(ctx, `
+			UPDATE jobs
+			SET state = $1, lease_token = NULLIF($2, ''),
+				lease_expires_at = CASE WHEN $2 = '' THEN NULL ELSE NOW() + INTERVAL '1 minute' END
+			WHERE id = $3`, string(state), token, id); err != nil {
+			t.Fatalf("setup state: %v", err)
+		}
+		return id
+	}
+
+	t.Run("cancel a running job fences out its worker", func(t *testing.T) {
+		id := create(t, models.JobStateRunning, "worker-token")
+
+		if err := s.CancelJob(ctx, AnyTenant, id); err != nil {
+			t.Fatalf("CancelJob: %v", err)
+		}
+		got, err := s.GetJob(ctx, AnyTenant, id)
+		if err != nil {
+			t.Fatalf("GetJob: %v", err)
+		}
+		if got.State != models.JobStateDead {
+			t.Errorf("state = %s, want DEAD", got.State)
+		}
+		if got.CompletedAt == nil {
+			t.Error("completed_at is nil after cancel, so retention never prunes it")
+		}
+		if got.LeaseToken != "" || got.LeaseExpiresAt != nil || got.StartedAt != nil {
+			t.Errorf("lease fields not cleared: token %q, expires %v, started %v", got.LeaseToken, got.LeaseExpiresAt, got.StartedAt)
+		}
+
+		if _, err := s.CompleteClaimedJob(ctx, id, "worker-token", nil); err != ErrLeaseLost {
+			t.Fatalf("CompleteClaimedJob after cancel: got %v, want ErrLeaseLost", err)
+		}
+		if err := s.FailClaimedJob(ctx, id, "worker-token", "boom", nil); err != ErrLeaseLost {
+			t.Fatalf("FailClaimedJob after cancel: got %v, want ErrLeaseLost", err)
+		}
+		if got, _ := s.GetJob(ctx, AnyTenant, id); got.State != models.JobStateDead {
+			t.Errorf("state = %s after the stale worker reported, want DEAD", got.State)
+		}
+	})
+
+	t.Run("cancel a pending job", func(t *testing.T) {
+		id := create(t, models.JobStatePending, "")
+		if err := s.CancelJob(ctx, AnyTenant, id); err != nil {
+			t.Fatalf("CancelJob: %v", err)
+		}
+		if got, _ := s.GetJob(ctx, AnyTenant, id); got.State != models.JobStateDead {
+			t.Errorf("state = %s, want DEAD", got.State)
+		}
+	})
+
+	for _, state := range []models.JobState{models.JobStateCompleted, models.JobStateDead} {
+		t.Run("cancel a "+string(state)+" job is an invalid transition", func(t *testing.T) {
+			id := create(t, state, "")
+			if err := s.CancelJob(ctx, AnyTenant, id); err != ErrInvalidTransition {
+				t.Fatalf("CancelJob: got %v, want ErrInvalidTransition", err)
+			}
+			if got, _ := s.GetJob(ctx, AnyTenant, id); got.State != state {
+				t.Errorf("state = %s, want %s unchanged", got.State, state)
+			}
+		})
+	}
+
+	t.Run("cancel a missing job is not found", func(t *testing.T) {
+		if err := s.CancelJob(ctx, AnyTenant, "test-cancel-missing"); err != ErrJobNotFound {
+			t.Fatalf("CancelJob: got %v, want ErrJobNotFound", err)
+		}
+	})
+}

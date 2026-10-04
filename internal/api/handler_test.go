@@ -398,6 +398,7 @@ func TestCancelJob(t *testing.T) {
 		name       string
 		jobID      string
 		queue      mockQueue
+		store      mockStore
 		wantStatus int
 	}{
 		{
@@ -406,11 +407,32 @@ func TestCancelJob(t *testing.T) {
 			queue:      mockQueue{},
 			wantStatus: http.StatusOK,
 		},
+		{
+			name:       "an unknown job returns 404",
+			jobID:      "missing",
+			store:      mockStore{getErr: store.ErrJobNotFound},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			// Gone between the handler's lookup and the fenced cancel.
+			name:       "a job deleted before the cancel returns 404",
+			jobID:      "job-1",
+			queue:      mockQueue{cancelErr: store.ErrJobNotFound},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			// COMPLETED and DEAD are terminal, including a job a worker finished
+			// after the handler's lookup.
+			name:       "a finished job returns 409",
+			jobID:      "job-1",
+			queue:      mockQueue{cancelErr: store.ErrInvalidTransition},
+			wantStatus: http.StatusConflict,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewHandler(tc.queue, mockStore{}, zerolog.Logger{}, testRegistry(), nil)
+			h := NewHandler(tc.queue, tc.store, zerolog.Logger{}, testRegistry(), nil)
 			if h == nil {
 				t.Skip("NewHandler not yet implemented")
 			}
